@@ -1,13 +1,21 @@
-# Fantasy Advisor sample demo
+# Fantasy Advisor — staging
 
-This is a public, sample-only preview for Streamlit Community Cloud. It demonstrates the planned read-only advisor interface for NBA and NFL using fictional players and values.
+A separate staging copy of the read-only ESPN fantasy advisor. It keeps the existing fictional NBA/NFL demo untouched.
 
-It does not collect or store cookies, connect to ESPN, Sleeper, or Yahoo, make network calls, or offer live fantasy advice. Do not add credentials to this repository or to the app.
+## What is in this staging build
 
-## Publish the demo
+- ESPN fantasy basketball connection and analysis for NBA leagues.
+- OIDC sign-in, owner-scoped PostgreSQL storage, encrypted ESPN credentials, and disconnect controls.
+- Optional OpenAI analysis behind per-league consent.
+- Streamlit Community Cloud deployment notes in `STREAMLIT_CLOUD_STAGING.md`.
 
-1. Create a GitHub repository and add these three files at its root.
-2. In Streamlit Community Cloud, create an app from that repository and select `app.py` as the entry point.
-3. The app needs no secrets or database configuration. Review the app's access settings before sharing its URL.
+## Current limits
 
-The full app is not included here. Its multi-user storage, provider connections, and isolation checks are still separate work.
+- This full advisor currently supports ESPN basketball only. The NFL view shown in the public demo uses fictional sample data; live ESPN NFL support is not implemented in this build.
+- Yahoo and Sleeper are future integrations.
+- Account isolation, OIDC, database migration, and security behavior still need staging verification. Do not use production ESPN credentials or real users yet.
+- The app runs its refresh worker inside the Streamlit process. It pauses when Community Cloud sleeps.
+
+## Deploy
+
+Follow `STREAMLIT_CLOUD_STAGING.md`. Deploy from a separate `cloud-staging` branch and use a separate Community Cloud app URL. Do not overwrite the existing demo or commit real secrets.
