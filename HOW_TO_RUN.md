@@ -1,4 +1,4 @@
-# How to Run Fantasy Basketball Advisor
+# How to Run Fantasy Advisor
 
 > **Development status:** The app now requires an authenticated account, stores ESPN connections encrypted, and scopes private records and caches by owner and league. Local development can use one explicitly enabled local profile. This is still a pre-release build: Community Cloud is under evaluation, the production schema must be provisioned, and account isolation has not been tested. Do not deploy it to multiple users yet.
 
@@ -17,7 +17,7 @@ This site is read-only. It never changes lineups, submits waiver claims, or prop
    ```
 
 6. Paste that value into `CREDENTIAL_ENCRYPTION_KEY` in `.env`. Keep it private; losing it makes saved ESPN cookies unreadable.
-7. Start the site. Use **Connect an ESPN basketball league** in the sidebar to add a league.
+7. Start the site. Use **Connect an ESPN fantasy league** in the sidebar, choose Basketball or Football, and enter the league ID and current-season cookies.
 
 For hosted use, set up OIDC in the identity provider and Streamlit secrets, use a shared SQL database, set `APP_ENV="production"`, and turn off the local profile. The app accepts any authenticated identity from the configured OIDC provider and has no separate email allowlist; configure the provider to accept the accounts you intend to support. Before starting the app, configure `DATABASE_URL` and run `alembic upgrade head` from this project folder to create the account schema. This migration has not been applied to a hosted database; deployment and multi-account isolation still require approval and review.
 
@@ -67,7 +67,7 @@ The existing `render.yaml` and `render_start.py` are for the separate Render hos
 Never paste cookies into chat, screenshots, source code, or `.env`.
 
 1. Sign in to ESPN in your normal browser.
-2. Open your fantasy basketball league page.
+2. Open your fantasy basketball or football league page.
 3. Press **F12**.
 4. Open **Application**. Click `>>` if the tab is hidden.
 5. Under **Storage**, expand **Cookies**.
@@ -91,7 +91,7 @@ The AI Analyst is temporarily removed from the app. No analyst worker or OpenAI 
 
 ## Daily routine
 
-1. Open **Home** for the morning summary.
+1. For NBA, open **Home** for the morning summary. For NFL, open **NFL → Football Center** for the weekly matchup, roster, ESPN projections, and same-position checks.
 2. Open **Strategy Board** for the four-week forecast and current priorities.
 3. Open **Weekly Lineup**, click each day, and review every injury warning.
 4. Make lineup changes yourself on ESPN.

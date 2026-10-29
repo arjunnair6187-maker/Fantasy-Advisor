@@ -20,7 +20,8 @@ from database import (forecast_history, initialize_database, move_decision_histo
     save_move_decision, save_power_snapshot, save_weekly_result,
     set_tenant_required, set_tenant_scope, snapshot_history, update_move_decision,
     weekly_result_history)
-from espn_data import ESPN_SEASON_YEAR, connect_to_league
+from espn_data import (ESPN_NFL_SEASON_YEAR, ESPN_SEASON_YEAR,
+    connect_to_league, connect_to_nfl_league)
 from manual_fallback import blank_template, read_pasted_csv, read_uploaded_csv
 from intelligence_worker import stop_user_workers
 from move_simulator import horizon_totals, rank_streaming_moves, simulate_add_drop
@@ -367,11 +368,11 @@ def updated_caption():
 
 @st.cache_resource(ttl=150)
 def load_league(user_id, league_id, connection_id, connection_version,
-                provider_league_id, session_key, season=ESPN_SEASON_YEAR):
+                provider_league_id, session_key, season=ESPN_SEASON_YEAR,
+                sport="nba"):
     credentials = account_store.get_provider_credentials(user_id, connection_id)
-    return connect_to_league(
-        year=season, credentials=credentials, league_id=provider_league_id
-    )
+    connector = connect_to_nfl_league if str(sport).lower() == "nfl" else connect_to_league
+    return connector(year=season, credentials=credentials, league_id=provider_league_id)
 
 
 @st.cache_resource(ttl=1800)
@@ -2283,10 +2284,161 @@ def render_scoring_check():
     st.caption(RARE_STATS_WARNING)
 
 
+def _nfl_stat_number(value):
+    try:
+        number = float(value)
+        return round(number, 2) if pd.notna(number) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _nfl_roster_rows(players, week):
+    rows = []
+    for player in players:
+        stats = getattr(player, "stats", None) or {}
+        week_stats = stats.get(week, stats.get(str(week), {})) if isinstance(stats, dict) else {}
+        week_stats = week_stats if isinstance(week_stats, dict) else {}
+        slots = getattr(player, "eligibleSlots", None) or []
+        rows.append({
+            "Player": getattr(player, "name", "Unknown"),
+            "Position": getattr(player, "position", "Unknown"),
+            "NFL team": getattr(player, "proTeam", "Unknown"),
+            "Lineup slot": getattr(player, "lineupSlot", "Unknown"),
+            "Eligible slots": ", ".join(map(str, slots)),
+            "Injury status": getattr(player, "injuryStatus", "Unknown") or "Unknown",
+            "Week points": _nfl_stat_number(week_stats.get("points")),
+            "Week projection": _nfl_stat_number(week_stats.get("projected_points")),
+            "Season points": _nfl_stat_number(getattr(player, "total_points", None)),
+            "Season avg": _nfl_stat_number(getattr(player, "avg_points", None)),
+        })
+    return rows
+
+
+def render_nfl_dashboard(league, team, league_record):
+    week = int(getattr(league, "current_week", None)
+               or getattr(league, "nfl_week", None) or 1)
+    hero(
+        f"ESPN fantasy football · {league_record['season']} season · Week {week}",
+        "Football Center",
+        "Read-only roster and matchup context from your ESPN league. Make lineup and transaction changes in ESPN.",
+    )
+    updated_caption()
+    try:
+        matchups = league.scoreboard(week=week)
+    except Exception:
+        matchups = []
+    matchup = next((item for item in matchups if team.team_id in {
+        getattr(getattr(item, "home_team", None), "team_id", None),
+        getattr(getattr(item, "away_team", None), "team_id", None),
+    }), None)
+    opponent = None
+    my_score = opp_score = my_projection = opp_projection = None
+    if matchup is not None:
+        is_home = matchup.home_team.team_id == team.team_id
+        opponent = matchup.away_team if is_home else matchup.home_team
+        my_score = getattr(matchup, "home_score" if is_home else "away_score", None)
+        opp_score = getattr(matchup, "away_score" if is_home else "home_score", None)
+        my_projection = getattr(matchup, "home_projected" if is_home else "away_projected", None)
+        opp_projection = getattr(matchup, "away_projected" if is_home else "home_projected", None)
+
+    record = "–".join(str(getattr(team, name, 0) or 0) for name in ("wins", "losses", "ties"))
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Record", record)
+    c2.metric("Current week", week)
+    c3.metric("Points for", _nfl_stat_number(getattr(team, "points_for", None)) or "—")
+    c4.metric("Matchup", opponent.team_name if opponent else "Not available")
+    if opponent:
+        score_text = "Score not returned yet"
+        if my_score is not None and opp_score is not None:
+            score_text = f"{float(my_score):.1f} – {float(opp_score):.1f}"
+        projection_text = "Projection not returned"
+        if my_projection is not None and opp_projection is not None:
+            projection_text = f"ESPN projection: {float(my_projection):.1f} – {float(opp_projection):.1f}"
+        st.info(f"Week {week} matchup vs {opponent.team_name}: {score_text}. {projection_text}.")
+    else:
+        st.info("ESPN has not returned a matchup for your team in the current week.")
+
+    roster_rows = _nfl_roster_rows(getattr(team, "roster", []), week)
+    st.subheader("Roster and weekly projections")
+    if roster_rows:
+        roster = pd.DataFrame(roster_rows)
+        st.dataframe(roster, hide_index=True, use_container_width=True)
+        st.caption("ESPN supplies league-scored points and projections. This view does not change your lineup.")
+        bench_slots = {"BE", "BN", "BENCH", "IR", "INJURED RESERVE", "PUP"}
+        swaps = []
+        starters = [row for row in roster_rows
+                    if str(row["Lineup slot"]).strip().upper() not in bench_slots
+                    and row["Week projection"] is not None]
+        bench = [row for row in roster_rows
+                 if str(row["Lineup slot"]).strip().upper() in bench_slots
+                 and row["Week projection"] is not None
+                 and str(row["Injury status"]).strip().upper() not in {"OUT", "IR", "INJURED RESERVE", "SUSPENDED"}]
+        for starter in starters:
+            same_position = [candidate for candidate in bench
+                             if candidate["Position"] == starter["Position"]
+                             and candidate["Player"] != starter["Player"]]
+            if not same_position:
+                continue
+            replacement = max(same_position, key=lambda row: row["Week projection"])
+            difference = replacement["Week projection"] - starter["Week projection"]
+            if difference >= 2.0:
+                swaps.append({
+                    "Current starter": starter["Player"],
+                    "Position": starter["Position"],
+                    "Bench option": replacement["Player"],
+                    "Starter projection": starter["Week projection"],
+                    "Bench projection": replacement["Week projection"],
+                    "Projection difference": round(difference, 2),
+                    "Injury status": replacement["Injury status"],
+                })
+        st.subheader("Same-position projection checks")
+        if swaps:
+            st.dataframe(pd.DataFrame(swaps), hide_index=True, use_container_width=True)
+            st.caption("Flags a same-position bench player only when ESPN projects at least 2 more points this week. Check late injury news and lineup eligibility in ESPN.")
+        else:
+            st.info("No same-position bench player clears the 2-point projection threshold, or ESPN did not return enough weekly projections.")
+    else:
+        st.info("ESPN returned an empty roster for this team.")
+
+    st.subheader("Available players")
+    try:
+        available = league.free_agents(week=week, size=25)
+    except Exception as error:
+        available = None
+        st.caption(f"ESPN free-agent list unavailable ({type(error).__name__}).")
+    if available:
+        available_rows = []
+        for player in available:
+            stats = getattr(player, "stats", None) or {}
+            week_stats = stats.get(week, stats.get(str(week), {})) if isinstance(stats, dict) else {}
+            week_stats = week_stats if isinstance(week_stats, dict) else {}
+            available_rows.append({
+                "Player": getattr(player, "name", "Unknown"),
+                "Position": getattr(player, "position", "Unknown"),
+                "NFL team": getattr(player, "proTeam", "Unknown"),
+                "Injury status": getattr(player, "injuryStatus", "Unknown") or "Unknown",
+                "Week projection": _nfl_stat_number(week_stats.get("projected_points")),
+                "Season avg": _nfl_stat_number(getattr(player, "avg_points", None)),
+                "Rostered %": _nfl_stat_number(getattr(player, "percent_owned", None)),
+            })
+        available_rows.sort(
+            key=lambda row: (row["Week projection"] is not None,
+                             row["Week projection"] if row["Week projection"] is not None else -1),
+            reverse=True,
+        )
+        st.dataframe(pd.DataFrame(available_rows), hide_index=True, use_container_width=True)
+    elif available is not None:
+        st.info("ESPN returned no available players for this week.")
+    st.caption("Available-player projections use your ESPN league's scoring. Review injury news and claim settings in ESPN before acting.")
+
+
 def render_new_espn_connection(user_id, expanded=True):
-    with st.sidebar.expander("Connect an ESPN basketball league", expanded=expanded):
+    with st.sidebar.expander("Connect an ESPN fantasy league", expanded=expanded):
         st.caption("Cookies are sent only after you submit this form and are encrypted before they are saved.")
         with st.form("new_espn_connection"):
+            sport_label = st.selectbox(
+                "League sport", ["Basketball", "Football"], key="new_espn_sport"
+            )
             league_id = st.text_input("ESPN league ID", key="new_espn_league_id")
             espn_s2 = st.text_input("espn_s2 cookie", type="password", key="new_espn_s2")
             swid = st.text_input("SWID cookie", type="password", key="new_espn_swid")
@@ -2300,12 +2452,12 @@ def render_new_espn_connection(user_id, expanded=True):
             st.session_state.pop("new_espn_swid", None)
             st.error("Enter the league ID and both required cookies.")
             return
+        sport = "nfl" if sport_label == "Football" else "nba"
+        season = ESPN_NFL_SEASON_YEAR if sport == "nfl" else ESPN_SEASON_YEAR
+        connector = connect_to_nfl_league if sport == "nfl" else connect_to_league
         try:
-            league = connect_to_league(
-                year=ESPN_SEASON_YEAR,
-                credentials=credentials,
-                league_id=league_id.strip(),
-            )
+            league = connector(year=season, credentials=credentials,
+                               league_id=league_id.strip())
         except Exception as error:
             st.session_state.pop("new_espn_s2", None)
             st.session_state.pop("new_espn_swid", None)
@@ -2320,8 +2472,8 @@ def render_new_espn_connection(user_id, expanded=True):
             )
             league_name = str(getattr(getattr(league, "settings", None), "name", "") or label)
             league_record_id = account_store.create_league(
-                user_id, connection_id, league_id.strip(), "nba",
-                ESPN_SEASON_YEAR, name=league_name,
+                user_id, connection_id, league_id.strip(), sport,
+                season, name=league_name,
             )
             st.session_state["active_league_selector"] = league_record_id
             st.session_state.pop("new_espn_s2", None)
@@ -2358,9 +2510,10 @@ def render_credential_refresh(user_id, league_record, connection_id):
             st.error("Enter both current ESPN cookies.")
             return
         try:
-            connect_to_league(
-                year=ESPN_SEASON_YEAR,
-                credentials=credentials,
+            connector = (connect_to_nfl_league if league_record["sport"] == "nfl"
+                         else connect_to_league)
+            connector(
+                year=int(league_record["season"]), credentials=credentials,
                 league_id=league_record["provider_league_id"],
             )
             if not account_store.update_provider_credentials(
@@ -2389,7 +2542,7 @@ if APP_ENV != "development" and st.sidebar.button("Sign out"):
 
 st.markdown(
     '<div class="app-brand"><div class="app-brand-left">'
-    '<div class="app-brand-ball">🏀</div><div>'
+    '<div class="app-brand-ball">🏀🏈</div><div>'
     '<div class="app-brand-name">Fantasy Advisor</div>'
     '<div class="app-brand-subtitle">League intelligence platform</div></div></div>'
     '<div class="app-brand-status"><span class="live-dot"></span>STAGING · READ ONLY</div></div>',
@@ -2402,6 +2555,7 @@ NAVIGATION = {
     "PLAYERS": ["Waiver Market", "Roster Value", "Transactions", "Player Forecasts", "News"],
     "LEAGUE": ["Weekly Recap", "Power Rankings", "League Scout", "Draft Review"],
     "GM HUB": ["Strategy Board", "Playoff Planner", "Move Simulator", "Streaming Planner", "Transaction Portfolio", "Decision Tracker", "Accuracy Lab", "Scoring Check"],
+    "NFL": ["Football Center"],
 }
 primary_page = st.radio(
     "Main section", list(NAVIGATION), horizontal=True,
@@ -2415,12 +2569,6 @@ else:
         "Section page", section_pages, horizontal=True,
         label_visibility="collapsed", key=f"subnav_{primary_page}",
     )
-schedule = None
-try:
-    schedule = load_schedule()
-except Exception as error:
-    st.sidebar.warning(f"NBA schedule unavailable ({type(error).__name__}).")
-
 if source == "Manual fallback":
     st.title("🏀 Fantasy Basketball Advisor")
     updated_caption()
@@ -2438,7 +2586,7 @@ if source == "Manual fallback":
 try:
     available_leagues = [
         league_record for league_record in account_store.list_leagues(USER_ID)
-        if league_record["sport"] == "nba"
+        if league_record["sport"] in {"nba", "nfl"}
         and account_store.get_provider_connection(
             USER_ID, league_record["provider_connection_id"]
         ) is not None
@@ -2450,12 +2598,12 @@ except Exception as error:
 
 if not available_leagues:
     render_new_espn_connection(USER_ID)
-    st.info("Connect an ESPN basketball league to load your private roster and matchup data.")
+    st.info("Connect an ESPN basketball or football league to load your private roster and matchup data.")
     st.stop()
 
 league_by_id = {item["id"]: item for item in available_leagues}
 league_labels = {
-    item["id"]: f"{item['name'] or 'ESPN league'} · {item['season']}"
+    item["id"]: f"{item['name'] or 'ESPN league'} · {item['sport'].upper()} · {item['season']}"
     for item in available_leagues
 }
 active_league_key = "active_league_selector"
@@ -2497,7 +2645,7 @@ try:
     league = load_league(
         USER_ID, ACTIVE_LEAGUE_ID, connection_id, connection_version,
         active_league_record["provider_league_id"], SESSION_CACHE_KEY,
-        int(active_league_record["season"]),
+        int(active_league_record["season"]), active_league_record["sport"],
     )
 except Exception as error:
     st.error("ESPN could not be reached for this saved league. Update its cookies or use Manual fallback.")
@@ -2509,6 +2657,19 @@ selected_name = st.sidebar.selectbox(
     "My team", team_names, key=f"selected_team_{ACTIVE_LEAGUE_ID}"
 )
 team = next(team for team in league.teams if team.team_name == selected_name)
+if active_league_record["sport"] == "nfl":
+    if page == "Football Center":
+        render_nfl_dashboard(league, team, active_league_record)
+    else:
+        st.info("This is an NFL league. Open the NFL tab and choose Football Center; the other sections currently cover basketball.")
+    st.stop()
+
+schedule = None
+try:
+    schedule = load_schedule()
+except Exception as error:
+    st.sidebar.warning(f"NBA schedule unavailable ({type(error).__name__}).")
+
 reported_period = int(getattr(league, "currentMatchupPeriod", 1) or 1)
 active_period = effective_matchup_period(league, schedule)
 # This changes only the local read-only object. Every downstream calculation
@@ -2594,3 +2755,5 @@ elif page == "News":
     render_news(league, previous_league, team, matchup, schedule)
 elif page == "Scoring Check":
     render_scoring_check()
+elif page == "Football Center":
+    st.info("Select an ESPN football league in the sidebar, or use the connection form to add one.")

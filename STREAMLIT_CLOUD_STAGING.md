@@ -37,6 +37,8 @@ server_metadata_url = "<oidc-provider-metadata-url>"
 
 Community Cloud exposes root-level secrets as environment variables; the app reads the `[auth]` section through `st.secrets`. Never paste secrets into this guide, chat, source code, or GitHub. The AI Analyst is temporarily disabled in this staging build.
 
+The app currently supports ESPN NBA and an initial ESPN NFL Football Center. The NBA analysis pages are not yet available for NFL leagues. Yahoo and Sleeper are not implemented.
+
 ## Deploy a separate app
 
 1. In Streamlit Community Cloud, create a new app using the GitHub repository, the `cloud-staging` branch, and `app.py` as the entrypoint.
