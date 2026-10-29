@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 import threading
 import time
-
+import pandas as pd
 from account_store import get_provider_credentials
 from advice_engine import build_player_rows, injury_pool_from_league, rank_waivers
 from ai_intelligence import (AI_DATA_SHARING_SETTING, ai_is_configured,
@@ -80,7 +80,21 @@ def collect_once(
             )
         except Exception:
             previous_league = None
-        schedule = get_matchup_week_schedule()
+                
+        try:
+            schedule = get_matchup_week_schedule()
+        except Exception as error:
+            # Continue evidence collection if the NBA schedule is unavailable.
+            schedule = {
+                "status": "unavailable",
+                "week_name": None,
+                "start_date": None,
+                "end_date": None,
+                "game_counts": pd.DataFrame(columns=["NBA team", "Games"]),
+            }
+            data_gaps.append(
+                f"NBA schedule unavailable ({type(error).__name__})."
+            )
         league.currentMatchupPeriod = effective_matchup_period(league, schedule)
         my_rows = build_player_rows(
             league, team, set(), previous_league=previous_league
