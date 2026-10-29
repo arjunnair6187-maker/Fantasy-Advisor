@@ -2437,14 +2437,21 @@ def render_new_espn_connection(user_id, expanded=True):
             st.session_state.pop("new_espn_swid", None)
             st.error("Enter the league ID and both required cookies.")
             return
-        connection_id = None
-        league_record_id = None
         try:
             league = connect_to_league(
                 year=ESPN_SEASON_YEAR,
                 credentials=credentials,
                 league_id=league_id.strip(),
             )
+        except Exception as error:
+            st.session_state.pop("new_espn_s2", None)
+            st.session_state.pop("new_espn_swid", None)
+            st.error("The ESPN league check failed. The connection was not saved.")
+            st.caption(f"ESPN check issue: {type(error).__name__}")
+            return
+
+        connection_id = None
+        try:
             connection_id = account_store.create_provider_connection(
                 user_id, "espn", credentials, label=label,
             )
@@ -2466,8 +2473,8 @@ def render_new_espn_connection(user_id, expanded=True):
                     pass
             st.session_state.pop("new_espn_s2", None)
             st.session_state.pop("new_espn_swid", None)
-            st.error("ESPN could not verify this connection. Check the league ID and current cookies.")
-            st.caption(f"Connection issue: {type(error).__name__}")
+            st.error("The ESPN league check succeeded, but the app could not save the connection.")
+            st.caption(f"Save issue: {type(error).__name__}")
             return
         st.rerun()
 
