@@ -74,6 +74,7 @@ def collect_once(
         team = next((candidate for candidate in league.teams if candidate.team_name == selected_name), None)
         if team is None:
             raise RuntimeError("SelectedTeamNotFound")
+                    data_gaps = []
         try:
             previous_league = connect_to_league(
                 year=season - 1, credentials=credentials, league_id=provider_league_id
@@ -123,7 +124,7 @@ def collect_once(
         ).to_dict("records")
         relevant_names = [row["Player"] for row in my_rows + opponent_rows]
         relevant_names.extend(row.get("Player") for row in waiver_records if row.get("Player"))
-        data_gaps = []
+        
         try:
             news_items, news_time = fetch_nba_news()
             relevant_news = filter_relevant_news(news_items, relevant_names)
