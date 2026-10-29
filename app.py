@@ -2312,7 +2312,7 @@ def render_ai_analyst():
         st.success(consent_notice)
 
     updated_caption()
-    status = worker_status(user_id, league_id)
+    status = worker_status(USER_ID, ACTIVE_LEAGUE_ID)
     evidence = latest_intelligence_evidence()
     briefing_record = latest_ai_briefing()
     configured = ai_is_configured()
