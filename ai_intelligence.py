@@ -73,7 +73,7 @@ def deterministic_briefing(payload):
         )
     return {
         "headline": "Grounded intelligence snapshot",
-        "summary": "Structured data has been collected. Add the OpenAI key locally to enable conversational interpretation.",
+        "summary": "Structured data has been collected. Add OPENAI_API_KEY in Streamlit Community Cloud Secrets (or a private .env file locally) to enable conversational interpretation.",
         "reasons": reasons,
         "action_items": ["Verify injury designations near tipoff.", "Review the legal lineup plan before games lock."],
         "risks": ["AI interpretation is not active; deterministic analysis remains available."],
@@ -128,7 +128,7 @@ def answer_grounded_question(question, payload):
             "disabled",
         )
     if not ai_is_configured():
-        return "OpenAI is not configured yet. Add OPENAI_API_KEY to your private .env file, restart the site, and ask again.", "deterministic"
+        return "OpenAI is not configured yet. Add OPENAI_API_KEY in Streamlit Community Cloud app Settings → Secrets (or to a private .env file for local development), then restart and ask again.", "deterministic"
     try:
         from openai import OpenAI
 

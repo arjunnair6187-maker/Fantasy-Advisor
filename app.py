@@ -2338,7 +2338,7 @@ def render_ai_analyst():
         request_background_refresh(USER_ID, ACTIVE_LEAGUE_ID)
         st.success("Refresh requested. This league's worker will update its owner-scoped evidence; this page will reflect it on the next automatic refresh.")
     if not configured:
-        st.warning("OpenAI is not configured yet. The collector and deterministic analysis still work. Add the key only to your private .env file, then restart the site.")
+        st.warning("OpenAI is not configured yet. The collector and deterministic analysis still work. For Streamlit Community Cloud, add OPENAI_API_KEY in the app's Settings → Secrets. For local development, use a private .env file.")
     if evidence is None:
         st.info("The first evidence collection is still running. Leave the site open and this page will update automatically.")
         return

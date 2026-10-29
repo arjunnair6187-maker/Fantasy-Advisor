@@ -5,7 +5,9 @@ from __future__ import annotations
 from datetime import datetime
 import threading
 import time
+
 import pandas as pd
+
 from account_store import get_provider_credentials
 from advice_engine import build_player_rows, injury_pool_from_league, rank_waivers
 from ai_intelligence import (AI_DATA_SHARING_SETTING, ai_is_configured,
@@ -74,18 +76,18 @@ def collect_once(
         team = next((candidate for candidate in league.teams if candidate.team_name == selected_name), None)
         if team is None:
             raise RuntimeError("SelectedTeamNotFound")
-                    data_gaps = []
         try:
             previous_league = connect_to_league(
                 year=season - 1, credentials=credentials, league_id=provider_league_id
             )
         except Exception:
             previous_league = None
-                
+        data_gaps = []
         try:
             schedule = get_matchup_week_schedule()
         except Exception as error:
-            # Continue evidence collection if the NBA schedule is unavailable.
+            # Evidence collection should still work when NBA.com is unavailable.
+            # Schedule-dependent advice will have no game-count adjustment.
             schedule = {
                 "status": "unavailable",
                 "week_name": None,
@@ -124,7 +126,6 @@ def collect_once(
         ).to_dict("records")
         relevant_names = [row["Player"] for row in my_rows + opponent_rows]
         relevant_names.extend(row.get("Player") for row in waiver_records if row.get("Player"))
-        
         try:
             news_items, news_time = fetch_nba_news()
             relevant_news = filter_relevant_news(news_items, relevant_names)
