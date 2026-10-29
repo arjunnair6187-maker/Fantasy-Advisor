@@ -274,6 +274,7 @@ div[data-testid="stExpander"] { border:1px solid #2d416d; border-radius:16px; ba
 }
 .stApp { background:var(--app-black) !important; color:#f5f5f6; }
 .block-container { max-width:1180px; padding-top:.45rem; padding-bottom:5rem; }
+[data-testid="stMainBlockContainer"] { color:#f5f5f6; }
 [data-testid="stHeader"] { background:rgba(9,10,11,.94); }
 [data-testid="stToolbar"] { right:12px; }
 [data-testid="stSidebar"] { background:#111214 !important; border-right:1px solid #292b2e; }
@@ -304,20 +305,44 @@ h1 { font-size:1.65rem !important; font-weight:900 !important; }
 h2 { color:#f5f5f6 !important; font-size:1.05rem !important; font-weight:900 !important; text-transform:uppercase; letter-spacing:.025em; margin-top:1.6rem !important; }
 h3 { font-size:1rem !important; }
 p,li,[data-testid="stCaptionContainer"] { color:#999ca2; }
+.stMarkdown p { line-height:1.52; }
+label,[data-testid="stWidgetLabel"] { color:#d7d9dc !important; }
+[data-testid="stTextInput"] input,
+[data-testid="stTextArea"] textarea,
+[data-testid="stNumberInput"] input,
+[data-testid="stDateInput"] input,
+[data-baseweb="select"] > div {
+  color:#f5f5f6 !important; background:#111315 !important;
+  border-color:#36393d !important; border-radius:9px !important;
+}
+[data-testid="stTextInput"] input:focus,
+[data-testid="stTextArea"] textarea:focus,
+[data-testid="stNumberInput"] input:focus,
+[data-baseweb="select"] > div:focus-within {
+  border-color:var(--accent) !important;
+  box-shadow:0 0 0 1px rgba(85,240,90,.35) !important;
+}
+[data-testid="stCheckbox"] label,[data-testid="stRadio"] label { color:#d7d9dc !important; }
+[data-testid="stForm"] { background:#17191b; border:1px solid #303235; border-radius:14px; padding:16px; }
 .hero { padding:22px 23px; border:1px solid #2d2f32; border-radius:18px; background:linear-gradient(145deg,#202224,#17191b); margin-bottom:16px; box-shadow:0 14px 34px rgba(0,0,0,.24); }
 .hero-kicker { color:var(--accent); font-size:.68rem; letter-spacing:.11em; }
 .hero-title { font-size:1.75rem; margin:.35rem 0; }
 .hero-copy { color:#a1a3a8; font-size:.88rem; max-width:760px; }
+.hero { border-top:3px solid var(--accent); background:#1b1d1f; box-shadow:none; }
 [data-testid="stMetric"] { background:#1c1e20; border:1px solid #2f3134; border-radius:15px; padding:15px; box-shadow:none; }
 [data-testid="stMetricLabel"] { color:#8e9197; font-size:.68rem; font-weight:850; }
 [data-testid="stMetricValue"] { color:#fff; font-weight:900; }
 [data-testid="stDataFrame"] { border:1px solid #2f3134; border-radius:13px; background:#17191b; }
-.stAlert { border-radius:13px; border:1px solid #34363a; background:#1b1d1f; }
+.stAlert,[data-testid="stAlert"] { border-radius:13px; border:1px solid #34363a; background:#1b1d1f; color:#e1e3e6; }
 div[data-testid="stExpander"] { border:1px solid #303236; border-radius:13px; background:#191b1d; }
+.streamlit-expanderHeader { color:#e1e3e6 !important; font-weight:800; }
 .stTabs [data-baseweb="tab"] { background:#1d1f21; border:0; border-radius:10px; color:#a1a3a8; }
 .stTabs [aria-selected="true"] { color:#090b09 !important; background:var(--accent) !important; }
 .stButton button,.stDownloadButton button { background:#222426; color:#f4f5f5; border:1px solid #37393c; border-radius:10px; font-weight:850; }
 .stButton button:hover,.stDownloadButton button:hover { background:var(--accent); border-color:var(--accent); color:#0a0b0a; }
+.stButton button:focus-visible,.stDownloadButton button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.stButton button[kind="primary"] { background:var(--accent); color:#081008; border-color:var(--accent); }
+.stButton button[kind="primary"]:hover { background:#74f477; border-color:#74f477; }
 .command-card,.briefing-panel,.win-card,.value-tile,.round-card,.portfolio-card,.gameplan-card,.accuracy-card,.recap-card { background:#1b1d1f !important; border-color:#303235 !important; box-shadow:none; }
 .command-card.accent,.value-tile.good,.gameplan-card.opportunity { border-top:3px solid var(--accent) !important; }
 .command-card.warn,.value-tile.warn,.gameplan-card.danger { border-top:3px solid #ff6878 !important; }
