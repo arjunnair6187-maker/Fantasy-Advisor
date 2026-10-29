@@ -12,22 +12,17 @@ from streamlit_autorefresh import st_autorefresh
 
 import account_store
 from account_auth import require_user_id
-from ai_intelligence import (AI_DATA_SHARING_SETTING, ai_is_configured,
-    answer_grounded_question, configured_model)
 from advice_engine import (add_drop_suggestions, build_player_rows,
     injury_pool_from_league, is_unavailable_status, player_positions, rank_waivers,
     recommend_lineup, team_strengths, weekly_lineup_plan)
 from database import (forecast_history, initialize_database, move_decision_history,
-    get_app_setting, latest_ai_briefing, latest_intelligence_evidence,
-    power_snapshot_history, save_ai_conversation, save_daily_snapshot, save_matchup_forecasts,
+    power_snapshot_history, save_daily_snapshot, save_matchup_forecasts,
     save_move_decision, save_power_snapshot, save_weekly_result,
-    set_app_setting, set_tenant_required, set_tenant_scope, snapshot_history, update_move_decision,
+    set_tenant_required, set_tenant_scope, snapshot_history, update_move_decision,
     weekly_result_history)
 from espn_data import ESPN_SEASON_YEAR, connect_to_league
 from manual_fallback import blank_template, read_pasted_csv, read_uploaded_csv
-from intelligence_worker import (request_background_refresh,
-    start_background_worker, stop_background_worker, stop_user_workers,
-    worker_status)
+from intelligence_worker import stop_user_workers
 from move_simulator import horizon_totals, rank_streaming_moves, simulate_add_drop
 from nba_schedule import (get_matchup_week_schedule, get_team_defense_context,
     get_completed_week_schedules, get_upcoming_week_schedules, teams_playing_on)
@@ -52,6 +47,7 @@ st.set_page_config(
 
 set_tenant_required(True)
 USER_ID = require_user_id()
+stop_user_workers(USER_ID)
 APP_ENV = os.getenv("APP_ENV", "production").strip().lower()
 try:
     if APP_ENV == "development":
@@ -1908,15 +1904,20 @@ def render_strategy(league, previous_league, team):
             forecasts["Accuracy basis"] = "No completed forecast history yet"
         for _, forecast in forecasts.iterrows():
             probability = float(str(forecast["Win probability"]).strip("%"))
+            probability = max(0.0, min(100.0, probability))
+            dates_label = html.escape(str(forecast["Dates"]))
+            confidence_label = html.escape(str(forecast["Confidence"]))
+            probability_label = html.escape(str(forecast["Win probability"]))
+            range_label = html.escape(str(forecast["Expected range"]))
             st.markdown(
                 f'<div class="match-card">'
-                f'<div class="match-top"><span>Fantasy week {int(forecast["Fantasy week"])}</span><span>{forecast["Dates"]} · {forecast["Confidence"]} confidence</span></div>'
+                f'<div class="match-top"><span>Fantasy week {int(forecast["Fantasy week"])}</span><span>{dates_label} · {confidence_label} confidence</span></div>'
                 f'<div class="match-teams">'
                 f'<div><div class="match-team">{html.escape(str(team.team_name))}</div><div class="match-score">{forecast["Your projection"]:.1f}</div></div>'
                 f'<div class="match-vs">VS</div>'
                 f'<div class="match-team right">{html.escape(str(forecast["Opponent"]))}<div class="match-score">{forecast["Opponent projection"]:.1f}</div></div>'
                 f'</div><div class="match-bar"><div class="match-fill" style="width:{probability}%"></div></div>'
-                f'<div class="match-meta">{forecast["Win probability"]} win chance · {forecast["Projected margin"]:+.1f} projected margin · Range {forecast["Expected range"]}</div>'
+                f'<div class="match-meta">{probability_label} win chance · {forecast["Projected margin"]:+.1f} projected margin · Range {range_label}</div>'
                 f'</div>', unsafe_allow_html=True,
             )
         save_matchup_forecasts(ESPN_SEASON_YEAR, team.team_name, forecasts)
@@ -2268,144 +2269,6 @@ def render_boom_bust(league, previous_league, team, schedule, user_id, league_id
     st.caption("Boom and bust differentials are one estimated standard deviation above or below the adjusted projection. Low-confidence rows rely mainly on ESPN projections because too few 2026–27 games exist.")
 
 
-def render_ai_analyst():
-    hero(
-        "Grounded intelligence, not invented live knowledge", "AI Analyst",
-        "A background worker collects verified basketball evidence every 2.5 minutes. With your league's opt-in, OpenAI can explain what changed, why it matters, and what remains uncertain.",
-    )
-    data_sharing_enabled = (
-        get_app_setting(AI_DATA_SHARING_SETTING, "false") == "true"
-    )
-    with st.expander("Privacy and AI data sharing", expanded=not data_sharing_enabled):
-        st.write(
-            "When enabled, automatic briefings and questions send this league's "
-            "fantasy team name, matchup and scores, roster player names and stats, "
-            "injury designations, projections, waiver options, schedule details, "
-            "and matched news to OpenAI. Your question is sent with the evidence."
-        )
-        st.caption(
-            "ESPN cookies and API keys are never sent. OpenAI requests use storage "
-            "disabled. This choice is saved for the selected league. Turning it off "
-            "stops future calls; a request already in progress may finish. Locally "
-            "saved evidence and past analysis remain in your account."
-        )
-        with st.form(f"ai_data_sharing_preference_{ACTIVE_LEAGUE_ID}"):
-            requested_data_sharing = st.checkbox(
-                "I agree to send this league's details to OpenAI for AI analysis.",
-                value=data_sharing_enabled,
-                key=f"ai_data_sharing_checkbox_{ACTIVE_LEAGUE_ID}",
-            )
-            save_data_sharing = st.form_submit_button("Save AI data preference")
-        if save_data_sharing:
-            set_app_setting(
-                AI_DATA_SHARING_SETTING,
-                "true" if requested_data_sharing else "false",
-            )
-            st.session_state["ai_data_sharing_notice"] = (
-                "AI data sharing is enabled for this league."
-                if requested_data_sharing
-                else "AI data sharing is off for this league."
-            )
-            st.rerun()
-    consent_notice = st.session_state.pop("ai_data_sharing_notice", None)
-    if consent_notice:
-        st.success(consent_notice)
-
-    updated_caption()
-    status = worker_status(USER_ID, ACTIVE_LEAGUE_ID)
-    evidence = latest_intelligence_evidence()
-    briefing_record = latest_ai_briefing()
-    configured = ai_is_configured()
-    openai_label = (
-        "Available · sharing on" if configured and data_sharing_enabled
-        else "Available · sharing off" if configured
-        else "Key required"
-    )
-    worker_label = "Collecting" if status["running"] else "Ready"
-    if status.get("last_error"):
-        worker_label = f"Needs retry · {status['last_error']}"
-    last_collected = evidence["collected_at"] if evidence else "Waiting for first collection"
-    st.markdown(
-        '<div class="ai-status-grid">'
-        f'<div class="ai-status-card"><div class="ai-status-label">OpenAI</div><div class="ai-status-value">{html.escape(openai_label)}</div></div>'
-        f'<div class="ai-status-card"><div class="ai-status-label">Background worker</div><div class="ai-status-value">{html.escape(worker_label)}</div></div>'
-        f'<div class="ai-status-card"><div class="ai-status-label">Model</div><div class="ai-status-value">{html.escape(configured_model() if configured else "Deterministic fallback")}</div></div>'
-        f'<div class="ai-status-card"><div class="ai-status-label">Evidence collected</div><div class="ai-status-value">{html.escape(str(last_collected))}</div></div>'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-    if st.button("Refresh intelligence now", key="refresh_intelligence"):
-        request_background_refresh(USER_ID, ACTIVE_LEAGUE_ID)
-        st.success("Refresh requested. This league's worker will update its owner-scoped evidence; this page will reflect it on the next automatic refresh.")
-    if not configured:
-        st.warning("OpenAI is not configured yet. The collector and deterministic analysis still work. For Streamlit Community Cloud, add OPENAI_API_KEY in the app's Settings → Secrets. For local development, use a private .env file.")
-    if evidence is None:
-        st.info("The first evidence collection is still running. Leave the site open and this page will update automatically.")
-        return
-    if briefing_record and briefing_record["evidence_hash"] == evidence["evidence_hash"]:
-        briefing = briefing_record["briefing"]
-        st.markdown(
-            '<div class="ai-briefing">'
-            f'<div class="ai-headline">{html.escape(str(briefing.get("headline", "Intelligence briefing")))}</div>'
-            f'<div class="ai-summary">{html.escape(str(briefing.get("summary", "")))}</div></div>',
-            unsafe_allow_html=True,
-        )
-        left, right = st.columns(2)
-        with left:
-            st.subheader("Why the model interprets it this way")
-            for reason in briefing.get("reasons", []):
-                st.write(f"- {reason}")
-            st.subheader("Suggested attention")
-            for action in briefing.get("action_items", []):
-                st.write(f"- {action}")
-        with right:
-            st.subheader("Risks and uncertainty")
-            for risk in briefing.get("risks", []):
-                st.write(f"- {risk}")
-            st.subheader("Missing evidence")
-            gaps = briefing.get("data_gaps", []) or ["No explicit data gap was identified."]
-            for gap in gaps:
-                st.write(f"- {gap}")
-        adjustments = briefing.get("projection_adjustments", [])
-        st.subheader("AI projection research · shadow mode")
-        if adjustments:
-            st.dataframe(pd.DataFrame(adjustments), hide_index=True, use_container_width=True)
-            st.caption("These adjustments are tracked for accuracy but do not alter official site projections yet. They are capped at ±15% and require cited evidence.")
-        else:
-            st.info("The current evidence does not support a responsible AI projection adjustment.")
-    else:
-        st.info("New evidence is waiting for interpretation. The background worker will attach a briefing shortly.")
-    st.subheader("Ask about the collected evidence")
-    submitted = False
-    question = ""
-    if data_sharing_enabled and configured:
-        with st.form("grounded_ai_question"):
-            question = st.text_input(
-                "Question",
-                placeholder="Why did my matchup projection change, and which evidence mattered most?",
-            )
-            submitted = st.form_submit_button("Ask AI Analyst")
-    elif not data_sharing_enabled:
-        st.info("Enable AI data sharing above before sending a question or league evidence to OpenAI.")
-    else:
-        st.info("Add an OpenAI key to enable questions. Local evidence collection remains available.")
-    if submitted and question.strip():
-        with st.spinner("Analyzing the saved evidence..."):
-            answer, model = answer_grounded_question(
-                question.strip(), evidence["payload"],
-            )
-        save_ai_conversation(evidence["evidence_hash"], question.strip(), answer)
-        st.session_state["latest_ai_answer"] = answer
-        st.session_state["latest_ai_answer_model"] = model
-    if st.session_state.get("latest_ai_answer"):
-        st.markdown("**AI Analyst response**")
-        st.write(st.session_state["latest_ai_answer"])
-        st.caption(f"Model: {st.session_state.get('latest_ai_answer_model', 'unknown')} · Evidence snapshot: {evidence['collected_at']}")
-    with st.expander("Evidence sources and freshness"):
-        st.dataframe(pd.DataFrame(evidence["sources"]), hide_index=True, use_container_width=True)
-        st.caption("The evidence packet contains no ESPN cookies or API keys.")
-
-
 def render_scoring_check():
     st.title("Scoring check")
     updated_caption()
@@ -2514,7 +2377,6 @@ def render_credential_refresh(user_id, league_record, connection_id):
             st.error("ESPN could not verify the replacement cookies. The saved connection was not changed.")
             st.caption(f"Connection issue: {type(error).__name__}")
             return
-        request_background_refresh(user_id, league_record["id"])
         st.rerun()
 
 
@@ -2539,7 +2401,7 @@ NAVIGATION = {
     "MATCHUP": ["Matchup Center", "Opponent Gameplan", "Lineup Planner", "Injury Contingencies"],
     "PLAYERS": ["Waiver Market", "Roster Value", "Transactions", "Player Forecasts", "News"],
     "LEAGUE": ["Weekly Recap", "Power Rankings", "League Scout", "Draft Review"],
-    "GM HUB": ["AI Analyst", "Strategy Board", "Playoff Planner", "Move Simulator", "Streaming Planner", "Transaction Portfolio", "Decision Tracker", "Accuracy Lab", "Scoring Check"],
+    "GM HUB": ["Strategy Board", "Playoff Planner", "Move Simulator", "Streaming Planner", "Transaction Portfolio", "Decision Tracker", "Accuracy Lab", "Scoring Check"],
 }
 primary_page = st.radio(
     "Main section", list(NAVIGATION), horizontal=True,
@@ -2618,7 +2480,6 @@ connection_version = (
 render_new_espn_connection(USER_ID, expanded=False)
 render_credential_refresh(USER_ID, active_league_record, connection_id)
 if st.sidebar.button("Disconnect selected ESPN league", key=f"disconnect_{ACTIVE_LEAGUE_ID}"):
-    stop_background_worker(USER_ID, ACTIVE_LEAGUE_ID)
     account_store.disconnect_provider(USER_ID, connection_id)
     st.session_state.pop(active_league_key, None)
     st.session_state.pop(f"selected_team_{ACTIVE_LEAGUE_ID}", None)
@@ -2648,11 +2509,6 @@ selected_name = st.sidebar.selectbox(
     "My team", team_names, key=f"selected_team_{ACTIVE_LEAGUE_ID}"
 )
 team = next(team for team in league.teams if team.team_name == selected_name)
-start_background_worker(
-    USER_ID, ACTIVE_LEAGUE_ID, connection_id,
-    active_league_record["provider_league_id"], selected_name,
-    season=int(active_league_record["season"]), interval_seconds=150,
-)
 reported_period = int(getattr(league, "currentMatchupPeriod", 1) or 1)
 active_period = effective_matchup_period(league, schedule)
 # This changes only the local read-only object. Every downstream calculation
@@ -2696,8 +2552,6 @@ st.markdown(
 
 if page == "Championship Dashboard":
     render_home(league, previous_league, team, matchup, schedule)
-elif page == "AI Analyst":
-    render_ai_analyst()
 elif page == "Strategy Board":
     render_strategy(league, previous_league, team)
 elif page == "Playoff Planner":

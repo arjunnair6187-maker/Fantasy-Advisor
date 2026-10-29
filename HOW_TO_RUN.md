@@ -1,6 +1,6 @@
 # How to Run Fantasy Basketball Advisor
 
-> **Development status:** The app now requires an authenticated account, stores ESPN connections encrypted, and scopes private records, caches, and refresh workers by owner and league. Local development can use one explicitly enabled local profile. This is still a pre-release build: Community Cloud is under evaluation, the production schema must be provisioned, and account isolation has not been tested. Do not deploy it to multiple users yet.
+> **Development status:** The app now requires an authenticated account, stores ESPN connections encrypted, and scopes private records and caches by owner and league. Local development can use one explicitly enabled local profile. This is still a pre-release build: Community Cloud is under evaluation, the production schema must be provisioned, and account isolation has not been tested. Do not deploy it to multiple users yet.
 
 This site is read-only. It never changes lineups, submits waiver claims, or proposes trades on ESPN.
 
@@ -25,11 +25,11 @@ For hosted use, set up OIDC in the identity provider and Streamlit secrets, use 
 
 The full advisor can use `app.py` as its Community Cloud entrypoint. Community Cloud deploys from a GitHub repository, so the complete working source and `requirements.txt` must be in the selected repository and branch. The currently published sample-only demo is separate; do not replace it with this full app until its database, sign-in, and account-isolation checks are complete. Community Cloud runs from the repository root even when the entrypoint is in a subfolder.
 
-The app needs an external persistent PostgreSQL database; Community Cloud does not provide the shared application database this project needs. Create that database with a provider you choose, then configure the connection string in the app's Community Cloud **Secrets** settings. Also set root-level secrets for `APP_ENV = "production"`, `ALLOW_SINGLE_USER_DEV = "0"`, `DATABASE_URL`, and a stable, private `CREDENTIAL_ENCRYPTION_KEY`. Put the OIDC values in an `[auth]` section: `redirect_uri`, `cookie_secret`, `client_id`, `client_secret`, and `server_metadata_url`. Add `OPENAI_API_KEY` only if you want the optional analyst enabled; AI requests remain off until each league separately opts in. Community Cloud root-level secrets are exposed to the app as environment variables, while `[auth]` is read through `st.secrets`.
+The app needs an external persistent PostgreSQL database; Community Cloud does not provide the shared application database this project needs. Create that database with a provider you choose, then configure the connection string in the app's Community Cloud **Secrets** settings. Also set root-level secrets for `APP_ENV = "production"`, `ALLOW_SINGLE_USER_DEV = "0"`, `DATABASE_URL`, and a stable, private `CREDENTIAL_ENCRYPTION_KEY`. Put the OIDC values in an `[auth]` section: `redirect_uri`, `cookie_secret`, `client_id`, `client_secret`, and `server_metadata_url`. Community Cloud root-level secrets are exposed to the app as environment variables, while `[auth]` is read through `st.secrets`. The AI Analyst is temporarily disabled and needs no API key.
 
 Choose the final Community Cloud app subdomain before configuring OIDC, then register `https://<chosen-subdomain>.streamlit.app/oauth2callback` as the provider callback URL. Restrict allowed identities in the OIDC provider: this app has no separate email allowlist. A Community Cloud developer needs admin permission to the GitHub repository. Never commit a real `.streamlit/secrets.toml` or credentials.
 
-Before any multi-user launch, provision the external database, run `alembic upgrade head` once against that database, and complete the two-account isolation, sign-in, credential encryption, consent-revocation, and disconnect checks. Keep one app instance until the in-process background worker is replaced with durable jobs. Community Cloud hibernates apps after 12 hours without traffic, so the worker will pause while the app sleeps; this host is not suitable for time-critical, continuously running refresh work.
+Before any multi-user launch, provision the external database, run `alembic upgrade head` once against that database, and complete the two-account isolation, sign-in, credential encryption, consent-revocation, and disconnect checks. The AI Analyst worker is disabled in this build; league data refreshes while the app is open, with no scheduled background evidence collection.
 
 The existing `render.yaml` and `render_start.py` are for the separate Render hosting draft. Community Cloud does not use them. No cloud database has been provisioned and no migration or deployment has been run.
 
@@ -85,23 +85,9 @@ With `(.venv)` visible in Command Prompt, type:
 python -m pip install -r requirements.txt
 ```
 
-## Turn on the grounded AI analyst
+## AI Analyst status
 
-The basketball collector works without an AI key. An OpenAI key turns its saved evidence into conversational explanations. Never paste the key into chat, screenshots, or source code.
-
-1. In Visual Studio Code, click the private `.env` file in the project folder.
-2. Add these lines, filling in the key only inside that file:
-
-   ```dotenv
-   OPENAI_API_KEY="paste your private key here"
-   OPENAI_MODEL="gpt-6-luna"
-   ```
-
-3. Save with **Ctrl + S**.
-4. Stop and restart the site.
-5. Open **GM Hub → AI Analyst**. The OpenAI card should say **Connected**.
-
-The model name is optional; `gpt-6-luna` is the default used by the app. The key remains only in `.env`, which is excluded by `.gitignore` and replacement ZIP files.
+The AI Analyst is temporarily removed from the app. No analyst worker or OpenAI API calls run; existing saved analyst records are retained.
 
 ## Daily routine
 
@@ -113,9 +99,6 @@ The model name is optional; `gpt-6-luna` is the default used by the app. The key
 6. Check **News** again shortly before games begin.
 
 The open website automatically refreshes live ESPN league data and news approximately every 2.5 minutes. Interacting with a control can briefly delay the next refresh so your click is not interrupted.
-The separate **AI Analyst** background worker collects and stores a structured evidence snapshot locally approximately every 2.5 minutes while the site is running. It gathers private-league rosters, matchup scores, player performance windows and projections, the NBA schedule, injury designations, top available players, and matched news. It is scoped to the signed-in owner and selected league, and stops on sign-out, disconnect, or app-process shutdown. It does not run while the computer or site is off.
-Open **AI Analyst → Privacy and AI data sharing** and explicitly save consent before any league evidence or question is sent to OpenAI. With consent, the worker calls OpenAI only when evidence materially changes. The evidence can include the fantasy team name, matchup and scores, roster player names and stats, injury designations, projections, waiver options, schedule details, and matched news. ESPN cookies and API keys are not sent, and OpenAI Responses are requested with storage disabled. Consent is saved per league; turning it off stops future calls, though a request already in progress may finish. Locally stored evidence and past analysis remain in the account. Without consent, the worker can still collect local evidence and create deterministic summaries. The page shows evidence freshness, sources, missing data, reasoning, uncertainty, and enables the conversational question box only when sharing is enabled and an OpenAI key is configured.
-AI-suggested projection changes begin in **shadow mode**: they are recorded and displayed but do not change the website's official projections yet. This lets Accuracy Lab measure them before they can influence lineup or waiver advice.
 Current matchup scores use ESPN's detailed live box-score feed because its simpler scoreboard feed can lag or temporarily return zeros.
 The **Players → My Moves** page reads pending and recent waiver activity from ESPN. It cannot submit, reorder, or cancel a claim.
 Canceled claims are reconciled against ESPN's linked cancellation records so an older stale “pending” row does not continue affecting strategy.
@@ -175,7 +158,7 @@ Use **League → Weekly Recap** to review any completed fantasy week. It ranks a
 - Waiver targets are also checked against recent matched NBA news. A player with recent injury-related news is excluded from add/drop recommendations until you verify that report.
 - Flagrant fouls, ejections, and disqualifications count only when supplied by the data source.
 - Missing, stale, or uncertain data is labeled instead of guessed.
-- The core scoring, legal-lineup, waiver, and projection engines remain deterministic and work without an AI key. The optional OpenAI analyst explains the collected evidence and proposes clearly labeled shadow-mode research adjustments.
+- The core scoring, legal-lineup, waiver, and projection engines are deterministic. The AI Analyst is temporarily disabled.
 - Private snapshots and decisions are stored under the signed-in account and selected league in `DATABASE_URL`.
 - A hosted deployment needs a shared persistent SQL database and pre-provisioned account schema. Do not use the local SQLite example for multiple users.
 - If ESPN fails, choose **Manual fallback** and upload or paste the CSV template.

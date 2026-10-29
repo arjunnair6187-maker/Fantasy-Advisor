@@ -6,7 +6,7 @@ A separate staging copy of the read-only ESPN fantasy advisor. It keeps the exis
 
 - ESPN fantasy basketball connection and analysis for NBA leagues.
 - OIDC sign-in, owner-scoped PostgreSQL storage, encrypted ESPN credentials, and disconnect controls.
-- Optional OpenAI analysis behind per-league consent.
+- The AI Analyst is temporarily disabled; the app makes no OpenAI requests.
 - Streamlit Community Cloud deployment notes in `STREAMLIT_CLOUD_STAGING.md`.
 
 ## Current limits
@@ -14,7 +14,7 @@ A separate staging copy of the read-only ESPN fantasy advisor. It keeps the exis
 - This full advisor currently supports ESPN basketball only. The NFL view shown in the public demo uses fictional sample data; live ESPN NFL support is not implemented in this build.
 - Yahoo and Sleeper are future integrations.
 - Account isolation, OIDC, database migration, and security behavior still need staging verification. Do not use production ESPN credentials or real users yet.
-- The app runs its refresh worker inside the Streamlit process. It pauses when Community Cloud sleeps.
+- This staging build does not start a background evidence worker. League data refreshes while the app is open; there is no scheduled background collection.
 
 ## Deploy
 

@@ -56,7 +56,7 @@ def evidence_hash(payload):
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def deterministic_briefing(payload):
+def deterministic_briefing(payload, summary=None):
     """Useful local fallback when the cloud model is not configured or unavailable."""
     roster = payload.get("my_roster", [])
     injuries = [row for row in roster if str(row.get("injury_status", "")).upper() not in {"ACTIVE", "NORMAL", "HEALTHY", ""}]
@@ -73,7 +73,7 @@ def deterministic_briefing(payload):
         )
     return {
         "headline": "Grounded intelligence snapshot",
-        "summary": "Structured data has been collected. Add OPENAI_API_KEY in Streamlit Community Cloud Secrets (or a private .env file locally) to enable conversational interpretation.",
+        "summary": summary or "Structured data has been collected. AI interpretation is unavailable; deterministic analysis remains available.",
         "reasons": reasons,
         "action_items": ["Verify injury designations near tipoff.", "Review the legal lineup plan before games lock."],
         "risks": ["AI interpretation is not active; deterministic analysis remains available."],
@@ -85,9 +85,15 @@ def deterministic_briefing(payload):
 def generate_briefing(payload):
     """Generate a schema-validated briefing using only supplied evidence."""
     if not ai_data_sharing_enabled():
-        return deterministic_briefing(payload), "deterministic", None
+        return deterministic_briefing(
+            payload,
+            "Structured data has been collected. AI data sharing is off for this league; deterministic analysis is shown.",
+        ), "deterministic", None
     if not ai_is_configured():
-        return deterministic_briefing(payload), "deterministic", None
+        return deterministic_briefing(
+            payload,
+            "Structured data has been collected. Add OPENAI_API_KEY in Streamlit Community Cloud Secrets (or a private .env file locally) to enable AI interpretation.",
+        ), "deterministic", None
     try:
         from openai import OpenAI
 
@@ -113,7 +119,10 @@ def generate_briefing(payload):
         parsed = response.output_parsed
         return parsed.model_dump(), model, None
     except Exception as error:
-        fallback = deterministic_briefing(payload)
+        fallback = deterministic_briefing(
+            payload,
+            "Structured data has been collected, but the AI request did not complete. Deterministic analysis is shown.",
+        )
         fallback["risks"].append(
             f"OpenAI interpretation was unavailable ({type(error).__name__}); local fallback shown."
         )

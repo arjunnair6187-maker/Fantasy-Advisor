@@ -6,7 +6,6 @@ nba_api
 python-dotenv
 pandas
 feedparser
-openai
 pytest
 SQLAlchemy>=2.0,<3
 Alembic>=1.13,<2

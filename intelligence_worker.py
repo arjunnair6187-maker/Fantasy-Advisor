@@ -10,8 +10,6 @@ import pandas as pd
 
 from account_store import get_provider_credentials
 from advice_engine import build_player_rows, injury_pool_from_league, rank_waivers
-from ai_intelligence import (AI_DATA_SHARING_SETTING, ai_is_configured,
-    configured_model, evidence_hash, generate_briefing)
 from database import (get_app_setting, latest_ai_briefing, save_ai_briefing,
     save_intelligence_evidence, tenant_scope)
 from espn_data import ESPN_SEASON_YEAR, connect_to_league
@@ -68,6 +66,9 @@ def collect_once(
     season=ESPN_SEASON_YEAR,
 ):
     """Collect verified data, persist it, and interpret only changed evidence."""
+    from ai_intelligence import (AI_DATA_SHARING_SETTING, ai_is_configured,
+        configured_model, evidence_hash, generate_briefing)
+
     with tenant_scope(user_id, league_id):
         credentials = get_provider_credentials(user_id, connection_id)
         league = connect_to_league(

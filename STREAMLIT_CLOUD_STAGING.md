@@ -26,8 +26,6 @@ APP_ENV = "production"
 ALLOW_SINGLE_USER_DEV = "0"
 DATABASE_URL = "postgresql+psycopg://USER:PASSWORD@HOST:PORT/DATABASE?sslmode=require"
 CREDENTIAL_ENCRYPTION_KEY = "<generated-fernet-key>"
-# Optional. Omit this key to keep the AI analyst unavailable.
-OPENAI_API_KEY = "<private-openai-key>"
 
 [auth]
 redirect_uri = "https://<staging-subdomain>.streamlit.app/oauth2callback"
@@ -37,7 +35,7 @@ client_secret = "<oidc-client-secret>"
 server_metadata_url = "<oidc-provider-metadata-url>"
 ```
 
-Community Cloud exposes root-level secrets as environment variables; the app reads the `[auth]` section through `st.secrets`. Never paste secrets into this guide, chat, source code, or GitHub. The OpenAI analyst remains opt-in separately for each league.
+Community Cloud exposes root-level secrets as environment variables; the app reads the `[auth]` section through `st.secrets`. Never paste secrets into this guide, chat, source code, or GitHub. The AI Analyst is temporarily disabled in this staging build.
 
 ## Deploy a separate app
 
@@ -49,6 +47,6 @@ Community Cloud exposes root-level secrets as environment variables; the app rea
 
 ## Staging limits
 
-Community Cloud sleeps an app after 12 hours without traffic. This app's refresh worker runs in the app process, so background refresh pauses while the app sleeps. Use staging for review and manual checks, not continuous or time-critical updates. The worker must be moved to durable background jobs before multi-instance or always-on production use. Free database plans can also pause or omit backups; confirm the provider's current limits and recovery options before storing real league data.
+This staging build does not run an AI Analyst background worker. League data refreshes while the app is open; there is no scheduled background evidence collection. Free database plans can also pause or omit backups; confirm the provider's current limits and recovery options before storing real league data.
 
 This guide does not indicate that a database, GitHub branch, or Community Cloud app has been created. The account-isolation and security checks remain incomplete.
