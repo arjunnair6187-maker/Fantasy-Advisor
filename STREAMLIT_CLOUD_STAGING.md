@@ -37,7 +37,7 @@ server_metadata_url = "<oidc-provider-metadata-url>"
 
 Community Cloud exposes root-level secrets as environment variables; the app reads the `[auth]` section through `st.secrets`. Never paste secrets into this guide, chat, source code, or GitHub. The AI Analyst is temporarily disabled in this staging build.
 
-The app currently supports ESPN NBA and an initial ESPN NFL Football Center. The NBA analysis pages are not yet available for NFL leagues. Yahoo and Sleeper are not implemented.
+The app supports ESPN NBA and NFL, plus a read-only Sleeper NFL adapter using the NFL HUD. Sleeper's current public API does not supply player projections or weekly schedules to this adapter. Yahoo is pending application approval and OAuth credentials.
 
 ## Deploy a separate app
 

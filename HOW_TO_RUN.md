@@ -17,7 +17,7 @@ This site is read-only. It never changes lineups, submits waiver claims, or prop
    ```
 
 6. Paste that value into `CREDENTIAL_ENCRYPTION_KEY` in `.env`. Keep it private; losing it makes saved ESPN cookies unreadable.
-7. Start the site. Use **Connect an ESPN fantasy league** in the sidebar, choose Basketball or Football, and enter the league ID and current-season cookies.
+7. Start the site. Use **Connect an ESPN fantasy league** for NBA or NFL, or **Connect a Sleeper NFL league** to find your leagues by Sleeper username. Sleeper does not require cookies or an API key.
 
 For hosted use, set up OIDC in the identity provider and Streamlit secrets, use a shared SQL database, set `APP_ENV="production"`, and turn off the local profile. The app accepts any authenticated identity from the configured OIDC provider and has no separate email allowlist; configure the provider to accept the accounts you intend to support. Before starting the app, configure `DATABASE_URL` and run `alembic upgrade head` from this project folder to create the account schema. This migration has not been applied to a hosted database; deployment and multi-account isolation still require approval and review.
 
@@ -91,7 +91,7 @@ The AI Analyst is temporarily removed from the app. No analyst worker or OpenAI 
 
 ## Daily routine
 
-1. For NBA, open **Home** for the morning summary. For NFL, open **NFL → Football Center** for the weekly matchup, roster, ESPN projections, and same-position checks.
+1. Choose the connected league in **League Settings**. The HUD changes automatically: NBA leagues show basketball sections; NFL leagues show football sections. Open **Roster → Championship Dashboard** for NBA or **Roster → Football Center** for NFL. Sleeper leagues use current scoring and trending-add data; ESPN leagues also expose weekly projections in this build.
 2. Open **Strategy Board** for the four-week forecast and current priorities.
 3. Open **Weekly Lineup**, click each day, and review every injury warning.
 4. Make lineup changes yourself on ESPN.

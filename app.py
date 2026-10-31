@@ -30,6 +30,7 @@ from nba_schedule import (get_matchup_week_schedule, get_team_defense_context,
 from news_data import fetch_nba_news, filter_relevant_news
 from projections import project_team_for_week
 from scoring import RARE_STATS_WARNING, calculate_fantasy_points
+from sleeper_data import connect_to_sleeper_league, find_user_leagues
 from strategy_engine import (boom_bust_board, draft_recap, league_power_rankings,
     injury_contingency_plans, live_matchup_outlook, matchup_counterstrategy,
     matchup_forecasts, projection_accuracy, projection_accuracy_lab,
@@ -394,8 +395,17 @@ def updated_caption():
 @st.cache_resource(ttl=150)
 def load_league(user_id, league_id, connection_id, connection_version,
                 provider_league_id, session_key, season=ESPN_SEASON_YEAR,
-                sport="nba"):
+                sport="nba", provider="espn"):
     credentials = account_store.get_provider_credentials(user_id, connection_id)
+    provider = str(provider or "espn").strip().lower()
+    if provider == "sleeper":
+        if str(sport).lower() != "nfl":
+            raise ValueError("Sleeper league support is currently available for NFL only.")
+        return connect_to_sleeper_league(
+            year=season, credentials=credentials, league_id=provider_league_id,
+        )
+    if provider != "espn":
+        raise ValueError("That league provider is not supported in this build.")
     connector = connect_to_nfl_league if str(sport).lower() == "nfl" else connect_to_league
     return connector(year=season, credentials=credentials, league_id=provider_league_id)
 
@@ -1445,14 +1455,14 @@ def render_decision_tracker(team):
     st.caption("Later phases will compare followed decisions with actual results and calculate projection error and regret.")
 
 
-def render_accuracy_lab(team):
+def render_accuracy_lab(team, season=ESPN_SEASON_YEAR):
     hero(
         "Measure the model, not just the matchup", "Projection Accuracy Lab",
         "Compare predictions saved before each matchup with archived final results, reveal systematic bias, and let confidence grow only when evidence grows.",
     )
     updated_caption()
-    forecasts = forecast_history(ESPN_SEASON_YEAR, team.team_name)
-    results = weekly_result_history(ESPN_SEASON_YEAR, team.team_name)
+    forecasts = forecast_history(season, team.team_name)
+    results = weekly_result_history(season, team.team_name)
     frame, summary = projection_accuracy_lab(forecasts, results)
     if frame.empty:
         st.info("No completed matchup has both a saved pre-matchup forecast and an archived final result yet. The site is now recording both automatically.")
@@ -2335,23 +2345,110 @@ def _nfl_roster_rows(players, week):
             "Week projection": _nfl_stat_number(week_stats.get("projected_points")),
             "Season points": _nfl_stat_number(getattr(player, "total_points", None)),
             "Season avg": _nfl_stat_number(getattr(player, "avg_points", None)),
+            "Trending adds": getattr(player, "trending_adds", None),
         })
     return rows
+
+
+def _nfl_optimal_lineup(rows):
+    """Maximize ESPN's weekly projections within the team's active slot mix."""
+    bench_slots = {"", "BE", "BN", "BENCH", "IR", "INJURED RESERVE", "PUP", "FA"}
+    slot_counts = {}
+    for row in rows:
+        slot = str(row.get("Lineup slot") or "").strip().upper()
+        if slot and slot not in bench_slots:
+            slot_counts[slot] = slot_counts.get(slot, 0) + 1
+    slots = [slot for slot, count in slot_counts.items() for _ in range(count)]
+    if not slots:
+        return [], None, None
+
+    eligible_groups = {
+        "FLEX": {"RB", "WR", "TE"},
+        "RB/WR/TE": {"RB", "WR", "TE"},
+        "RB/WR": {"RB", "WR"},
+        "WR/TE": {"WR", "TE"},
+        "OP": {"QB", "RB", "WR", "TE", "K"},
+        "OFFENSIVE PLAYER": {"QB", "RB", "WR", "TE", "K"},
+    }
+
+    candidates = []
+    unavailable = {"OUT", "IR", "INJURED RESERVE", "SUSPENDED"}
+    for row in rows:
+        projection = row.get("Week projection")
+        if projection is None or str(row.get("Injury status") or "").strip().upper() in unavailable:
+            continue
+        eligible = {str(row.get("Position") or "").strip().upper()}
+        eligible.update(
+            part.strip().upper()
+            for token in str(row.get("Eligible slots") or "").split(",")
+            for part in token.split("/")
+            if part.strip()
+        )
+        candidates.append((row, float(projection), eligible))
+
+    if not candidates:
+        return [], None, None
+
+    def can_fill(eligible, slot):
+        slot = slot.strip().upper()
+        group = eligible_groups.get(slot, {slot})
+        expanded = set()
+        for item in eligible:
+            expanded.update(eligible_groups.get(item, {item}))
+        return bool(group & expanded)
+
+    # Bit-mask dynamic programming assigns each player to at most one slot.
+    # Prefer filling more slots first, then maximize the projected total.
+    states = {0: (0.0, ())}
+    for player_index, (_row, projection, eligible) in enumerate(candidates):
+        next_states = dict(states)
+        for mask, (total, assignment) in states.items():
+            for slot_index, slot in enumerate(slots):
+                bit = 1 << slot_index
+                if mask & bit or not can_fill(eligible, slot):
+                    continue
+                next_mask = mask | bit
+                next_value = (total + projection, assignment + ((slot_index, player_index),))
+                previous = next_states.get(next_mask)
+                if previous is None or next_value[0] > previous[0]:
+                    next_states[next_mask] = next_value
+        states = next_states
+
+    best_mask, (best_total, assignment) = max(
+        states.items(), key=lambda item: (item[0].bit_count(), item[1][0])
+    )
+    del best_mask
+    assigned_by_slot = {slot_index: player_index for slot_index, player_index in assignment}
+    recommended = []
+    for slot_index, slot in enumerate(slots):
+        player_index = assigned_by_slot.get(slot_index)
+        if player_index is None:
+            continue
+        row = dict(candidates[player_index][0])
+        row["Recommended slot"] = slot
+        recommended.append(row)
+
+    current_total = sum(
+        float(row["Week projection"])
+        for row in rows
+        if str(row.get("Lineup slot") or "").strip().upper() not in bench_slots
+        and row.get("Week projection") is not None
+        and str(row.get("Injury status") or "").strip().upper() not in unavailable
+    )
+    return recommended, round(current_total, 2), round(best_total, 2)
 
 
 def render_nfl_dashboard(league, team, league_record):
     week = int(getattr(league, "current_week", None)
                or getattr(league, "nfl_week", None) or 1)
+    provider_name = "Sleeper" if league_record.get("provider") == "sleeper" else "ESPN"
     hero(
-        f"ESPN fantasy football · {league_record['season']} season · Week {week}",
+        f"{provider_name} fantasy football · {league_record['season']} season · Week {week}",
         "Football Center",
-        "Read-only roster and matchup context from your ESPN league. Make lineup and transaction changes in ESPN.",
+        f"Read-only roster and matchup context from your {provider_name} league. Make lineup and transaction changes in {provider_name}.",
     )
     updated_caption()
-    try:
-        matchups = league.scoreboard(week=week)
-    except Exception:
-        matchups = []
+    matchups = _nfl_scoreboard(league, week)
     matchup = next((item for item in matchups if team.team_id in {
         getattr(getattr(item, "home_team", None), "team_id", None),
         getattr(getattr(item, "away_team", None), "team_id", None),
@@ -2376,61 +2473,49 @@ def render_nfl_dashboard(league, team, league_record):
         score_text = "Score not returned yet"
         if my_score is not None and opp_score is not None:
             score_text = f"{float(my_score):.1f} – {float(opp_score):.1f}"
-        projection_text = "Projection not returned"
+        projection_text = "Player projection not supplied by this provider"
         if my_projection is not None and opp_projection is not None:
-            projection_text = f"ESPN projection: {float(my_projection):.1f} – {float(opp_projection):.1f}"
+            projection_text = f"{provider_name} projection: {float(my_projection):.1f} – {float(opp_projection):.1f}"
         st.info(f"Week {week} matchup vs {opponent.team_name}: {score_text}. {projection_text}.")
     else:
-        st.info("ESPN has not returned a matchup for your team in the current week.")
+        st.info(f"{provider_name} has not returned a matchup for your team in the current week.")
 
     roster_rows = _nfl_roster_rows(getattr(team, "roster", []), week)
-    st.subheader("Roster and weekly projections")
+    st.subheader("Roster and weekly points" if league_record.get("provider") == "sleeper" else "Roster and weekly projections")
     if roster_rows:
         roster = pd.DataFrame(roster_rows)
         st.dataframe(roster, hide_index=True, use_container_width=True)
-        st.caption("ESPN supplies league-scored points and projections. This view does not change your lineup.")
-        bench_slots = {"BE", "BN", "BENCH", "IR", "INJURED RESERVE", "PUP"}
-        swaps = []
-        starters = [row for row in roster_rows
-                    if str(row["Lineup slot"]).strip().upper() not in bench_slots
-                    and row["Week projection"] is not None]
-        bench = [row for row in roster_rows
-                 if str(row["Lineup slot"]).strip().upper() in bench_slots
-                 and row["Week projection"] is not None
-                 and str(row["Injury status"]).strip().upper() not in {"OUT", "IR", "INJURED RESERVE", "SUSPENDED"}]
-        for starter in starters:
-            same_position = [candidate for candidate in bench
-                             if candidate["Position"] == starter["Position"]
-                             and candidate["Player"] != starter["Player"]]
-            if not same_position:
-                continue
-            replacement = max(same_position, key=lambda row: row["Week projection"])
-            difference = replacement["Week projection"] - starter["Week projection"]
-            if difference >= 2.0:
-                swaps.append({
-                    "Current starter": starter["Player"],
-                    "Position": starter["Position"],
-                    "Bench option": replacement["Player"],
-                    "Starter projection": starter["Week projection"],
-                    "Bench projection": replacement["Week projection"],
-                    "Projection difference": round(difference, 2),
-                    "Injury status": replacement["Injury status"],
-                })
-        st.subheader("Same-position projection checks")
-        if swaps:
-            st.dataframe(pd.DataFrame(swaps), hide_index=True, use_container_width=True)
-            st.caption("Flags a same-position bench player only when ESPN projects at least 2 more points this week. Check late injury news and lineup eligibility in ESPN.")
+        if league_record.get("provider") == "sleeper":
+            st.caption("Sleeper supplies current matchup scoring and roster status, but not weekly player projections through this connection.")
         else:
-            st.info("No same-position bench player clears the 2-point projection threshold, or ESPN did not return enough weekly projections.")
+            st.caption(f"{provider_name} supplies league-scored points and projections. This view does not change your lineup.")
+        recommended, current_total, best_total = _nfl_optimal_lineup(roster_rows)
+        st.subheader("Projection-based starting lineup" if league_record.get("provider") == "espn" else "Current weekly starters")
+        if recommended:
+            left, right = st.columns(2)
+            left.metric("Current projected starters", "—" if current_total is None else f"{current_total:.2f}")
+            delta = None if current_total is None or best_total is None else f"{best_total-current_total:+.2f} {provider_name} points"
+            right.metric("Best eligible projection", "—" if best_total is None else f"{best_total:.2f}", delta)
+            st.dataframe(pd.DataFrame(recommended), hide_index=True, use_container_width=True)
+        else:
+            if league_record.get("provider") == "sleeper":
+                st.info("Sleeper supplies current starters and scored points, but not the projections needed to rank alternate lineups.")
+            else:
+                st.info("A lineup recommendation is not available because ESPN did not return starter slots and usable weekly projections.")
+        st.caption(
+            "Uses ESPN starter slots, eligibility, and weekly projections. Confirm late injury news and lineup locks in ESPN."
+            if league_record.get("provider") == "espn"
+            else "Sleeper identifies the current starters; its public API does not include player projections for alternate-lineup ranking. Verify lineup rules in Sleeper."
+        )
     else:
-        st.info("ESPN returned an empty roster for this team.")
+        st.info(f"{provider_name} returned an empty roster for this team.")
 
     st.subheader("Available players")
     try:
         available = league.free_agents(week=week, size=25)
     except Exception as error:
         available = None
-        st.caption(f"ESPN free-agent list unavailable ({type(error).__name__}).")
+        st.caption(f"{provider_name} available-player list unavailable ({type(error).__name__}).")
     if available:
         available_rows = []
         for player in available:
@@ -2445,6 +2530,7 @@ def render_nfl_dashboard(league, team, league_record):
                 "Week projection": _nfl_stat_number(week_stats.get("projected_points")),
                 "Season avg": _nfl_stat_number(getattr(player, "avg_points", None)),
                 "Rostered %": _nfl_stat_number(getattr(player, "percent_owned", None)),
+                "Trending adds": getattr(player, "trending_adds", None),
             })
         available_rows.sort(
             key=lambda row: (row["Week projection"] is not None,
@@ -2453,8 +2539,626 @@ def render_nfl_dashboard(league, team, league_record):
         )
         st.dataframe(pd.DataFrame(available_rows), hide_index=True, use_container_width=True)
     elif available is not None:
-        st.info("ESPN returned no available players for this week.")
-    st.caption("Available-player projections use your ESPN league's scoring. Review injury news and claim settings in ESPN before acting.")
+        st.info(f"{provider_name} returned no available players for this week.")
+    st.caption(
+        "Available-player projections use your ESPN league's scoring. Review injury news and claim settings in ESPN before acting."
+        if league_record.get("provider") == "espn"
+        else "Available players are ordered by Sleeper's recent trending adds. This is interest data, not a scoring projection or endorsement; verify availability in Sleeper."
+    )
+
+
+def _nfl_week(league):
+    return int(getattr(league, "current_week", None)
+               or getattr(league, "nfl_week", None) or 1)
+
+
+def _nfl_scoreboard(league, week):
+    try:
+        return league.box_scores(week=int(week)) or []
+    except Exception:
+        try:
+            return league.scoreboard(week=int(week)) or []
+        except Exception:
+            return []
+
+
+def _nfl_matchup(league, team, week):
+    for matchup in _nfl_scoreboard(league, week):
+        home = getattr(matchup, "home_team", None)
+        away = getattr(matchup, "away_team", None)
+        if team.team_id in {getattr(home, "team_id", None), getattr(away, "team_id", None)}:
+            is_home = getattr(home, "team_id", None) == team.team_id
+            return matchup, (away if is_home else home), is_home
+    return None, None, None
+
+
+def _nfl_weekly_rows(league, week):
+    rows = []
+    for matchup in _nfl_scoreboard(league, week):
+        home = getattr(matchup, "home_team", None)
+        away = getattr(matchup, "away_team", None)
+        if home is None or away is None:
+            continue
+        home_score = _nfl_stat_number(getattr(matchup, "home_score", None))
+        away_score = _nfl_stat_number(getattr(matchup, "away_score", None))
+        rows.append({
+            "Week": int(week), "Home": getattr(home, "team_name", "Home"),
+            "Home points": home_score, "Away points": away_score,
+            "Away": getattr(away, "team_name", "Away"),
+            "Winner": (
+                "Pending" if home_score is None or away_score is None
+                else getattr(home, "team_name", "Home") if home_score > away_score
+                else getattr(away, "team_name", "Away") if away_score > home_score
+                else "Tie"
+            ),
+            "Margin": None if home_score is None or away_score is None else round(abs(home_score-away_score), 2),
+        })
+    return rows
+
+
+def _nfl_free_agent_rows(league, week, position=None, size=50):
+    try:
+        players = league.free_agents(
+            week=int(week), size=int(size),
+            position=None if position in (None, "All") else position,
+        ) or []
+    except Exception:
+        return None
+    rows = _nfl_roster_rows(players, week)
+    rows.sort(key=lambda row: (
+        row["Week projection"] is not None,
+        row["Week projection"] if row["Week projection"] is not None else -1,
+        row.get("Trending adds") or 0,
+    ), reverse=True)
+    return rows
+
+
+def _nfl_projection_by_position(rows, field="Week projection"):
+    result = {}
+    for row in rows:
+        position = str(row.get("Position") or "Unknown")
+        value = row.get(field)
+        if value is not None:
+            result.setdefault(position, []).append(float(value))
+    return {position: values for position, values in result.items()}
+
+
+def _nfl_same_position_swaps(rows, threshold=2.0):
+    bench_slots = {"BE", "BN", "BENCH", "IR", "INJURED RESERVE", "PUP"}
+    starters = [row for row in rows
+                if str(row.get("Lineup slot", "")).strip().upper() not in bench_slots
+                and row.get("Week projection") is not None]
+    bench = [row for row in rows
+             if str(row.get("Lineup slot", "")).strip().upper() in bench_slots
+             and row.get("Week projection") is not None
+             and str(row.get("Injury status", "")).upper() not in {"OUT", "IR", "INJURED RESERVE", "SUSPENDED"}]
+    suggestions = []
+    for starter in starters:
+        candidates = [row for row in bench
+                      if row["Position"] == starter["Position"]
+                      and row["Player"] != starter["Player"]]
+        if not candidates:
+            continue
+        replacement = max(candidates, key=lambda row: row["Week projection"])
+        difference = replacement["Week projection"] - starter["Week projection"]
+        if difference >= float(threshold):
+            suggestions.append({
+                "Current starter": starter["Player"], "Position": starter["Position"],
+                "Bench option": replacement["Player"],
+                "Starter projection": starter["Week projection"],
+                "Bench projection": replacement["Week projection"],
+                "Projected difference": round(difference, 2),
+                "Injury status": replacement["Injury status"],
+            })
+    suggestions.sort(key=lambda row: row["Projected difference"], reverse=True)
+    return suggestions
+
+
+def _nfl_schedule_entry(player, week):
+    schedule = getattr(player, "schedule", None) or {}
+    if not isinstance(schedule, dict):
+        return None
+    return schedule.get(int(week), schedule.get(str(int(week))))
+
+
+def _nfl_injury_rows(rows):
+    healthy = {"", "ACTIVE", "HEALTHY", "NORMAL", "NONE", "UNKNOWN"}
+    return [row for row in rows
+            if str(row.get("Injury status") or "").strip().upper() not in healthy]
+
+
+def _nfl_position_upgrades(team_rows, available_rows):
+    team_by_pos = _nfl_projection_by_position(team_rows)
+    free_by_pos = _nfl_projection_by_position(available_rows)
+    rows = []
+    for position, available in free_by_pos.items():
+        owned = team_by_pos.get(position, [])
+        if not owned:
+            continue
+        weakest = min(owned)
+        best_add = max(available)
+        if best_add > weakest:
+            rows.append({
+                "Position": position, "Lowest roster projection": round(weakest, 2),
+                "Best available projection": round(best_add, 2),
+                "Estimated weekly gain": round(best_add-weakest, 2),
+            })
+    rows.sort(key=lambda row: row["Estimated weekly gain"], reverse=True)
+    return rows
+
+
+def _nfl_transaction_rows(league, team):
+    if hasattr(league, "waiver_activity"):
+        try:
+            active, recent = league.waiver_activity(team.team_id)
+            return active, recent, None
+        except Exception as error:
+            return [], [], type(error).__name__
+    try:
+        active, recent = waiver_activity(league, team.team_id)
+        return active, recent, None
+    except Exception as error:
+        return [], [], type(error).__name__
+
+
+def _nfl_draft_rows(league):
+    rows = []
+    for pick in getattr(league, "draft", []) or []:
+        player = getattr(pick, "player", None)
+        drafted_by = getattr(pick, "team", None)
+        rows.append({
+            "Round": getattr(pick, "round_num", getattr(pick, "round", None)),
+            "Pick": getattr(pick, "round_pick", getattr(pick, "pick_num", None)),
+            "Team": getattr(drafted_by, "team_name", str(drafted_by or "Unknown")),
+            "Player": getattr(player, "name", str(player or "Unknown")),
+            "Position": getattr(player, "position", "Unknown"),
+            "NFL team": getattr(player, "proTeam", "Unknown"),
+        })
+    return rows
+
+
+def _nfl_save_current_forecast(league, team, opponent, matchup, is_home, season, week):
+    if matchup is None or opponent is None:
+        return
+    history = forecast_history(season, team.team_name)
+    if any(int(row.get("matchup_period", -1)) == int(week) for row in history):
+        return
+    own_projection = getattr(matchup, "home_projected" if is_home else "away_projected", None)
+    opponent_projection = getattr(matchup, "away_projected" if is_home else "home_projected", None)
+    own_projection = _nfl_stat_number(own_projection)
+    opponent_projection = _nfl_stat_number(opponent_projection)
+    if own_projection is None or opponent_projection is None:
+        return
+    save_matchup_forecasts(season, team.team_name, pd.DataFrame([{
+        "Fantasy week": int(week), "Opponent": opponent.team_name,
+        "Your projection": own_projection,
+        "Opponent projection": opponent_projection,
+    }]))
+
+
+def render_nfl_page(page, league, team, league_record):
+    week = _nfl_week(league)
+    season = int(league_record["season"])
+    provider_name = "Sleeper" if league_record.get("provider") == "sleeper" else "ESPN"
+    rows = _nfl_roster_rows(getattr(team, "roster", []), week)
+    matchup, opponent, is_home = _nfl_matchup(league, team, week)
+    _nfl_save_current_forecast(league, team, opponent, matchup, is_home, season, week)
+    if page == "Football Center":
+        render_nfl_dashboard(league, team, league_record)
+        return
+    if page == "Decision Tracker":
+        render_decision_tracker(team)
+        return
+    if page == "Accuracy Lab":
+        render_accuracy_lab(team, season=season)
+        return
+
+    hero(
+        f"{provider_name} fantasy football · {season} season · Week {week}",
+        page,
+        f"League-specific analysis from {provider_name} scoring and roster data. Advice is read-only; submit lineup and transaction changes in {provider_name}.",
+    )
+    updated_caption()
+
+    if page == "Weekly Lineup":
+        st.subheader("Projection-based starting lineup" if league_record.get("provider") == "espn" else "Current weekly starters")
+        recommended, current_total, best_total = _nfl_optimal_lineup(rows)
+        if recommended:
+            current_label = "—" if current_total is None else f"{current_total:.2f}"
+            best_label = "—" if best_total is None else f"{best_total:.2f}"
+            delta = None if current_total is None or best_total is None else f"{best_total-current_total:+.2f} {provider_name} points"
+            left, right = st.columns(2)
+            left.metric("Current projected starters", current_label)
+            right.metric("Best eligible projection", best_label, delta)
+            st.dataframe(pd.DataFrame(recommended), hide_index=True, use_container_width=True)
+        else:
+            if league_record.get("provider") == "sleeper":
+                st.info("Sleeper does not provide player projections through this API connection, so the app can show your current starters but cannot rank an alternate lineup yet.")
+            else:
+                st.info("A lineup recommendation is not available because ESPN did not return starter slots and usable weekly projections.")
+        st.subheader("Full roster and bench")
+        if rows:
+            st.dataframe(pd.DataFrame(rows).sort_values(
+                ["Lineup slot", "Week projection"], ascending=[True, False], na_position="last"
+            ), hide_index=True, use_container_width=True)
+        st.caption(
+            "The recommendation fills ESPN starter slots using ESPN eligibility and weekly projections. Confirm inactive players, flex rules, and final locks in ESPN."
+            if league_record.get("provider") == "espn"
+            else "Sleeper returns your current starters but not player projections for alternate-lineup ranking. Confirm inactive players, flex rules, and final locks in Sleeper."
+        )
+        return
+
+    if page in {"Matchup Center", "Opponent Gameplan"}:
+        if matchup is None or opponent is None:
+            st.info(f"{provider_name} has not returned a matchup for this team and week.")
+            return
+        own_score = _nfl_stat_number(getattr(matchup, "home_score" if is_home else "away_score", None))
+        opp_score = _nfl_stat_number(getattr(matchup, "away_score" if is_home else "home_score", None))
+        own_proj = _nfl_stat_number(getattr(matchup, "home_projected" if is_home else "away_projected", None))
+        opp_proj = _nfl_stat_number(getattr(matchup, "away_projected" if is_home else "home_projected", None))
+        left, right = st.columns(2)
+        left.metric(team.team_name, "—" if own_score is None else f"{own_score:.1f}",
+                    None if own_proj is None else f"{provider_name} proj. {own_proj:.1f}")
+        right.metric(opponent.team_name, "—" if opp_score is None else f"{opp_score:.1f}",
+                     None if opp_proj is None else f"{provider_name} proj. {opp_proj:.1f}")
+        own_rows = _nfl_roster_rows(getattr(team, "roster", []), week)
+        opp_rows = _nfl_roster_rows(getattr(opponent, "roster", []), week)
+        value_field = "Week points" if league_record.get("provider") == "sleeper" else "Week projection"
+        own_groups = _nfl_projection_by_position(own_rows, field=value_field)
+        opp_groups = _nfl_projection_by_position(opp_rows, field=value_field)
+        position_rows = []
+        for position in sorted(set(own_groups) | set(opp_groups)):
+            own = sum(own_groups.get(position, []))
+            theirs = sum(opp_groups.get(position, []))
+            position_rows.append({
+                "Position": position,
+                "Your roster points" if value_field == "Week points" else "Your roster projection": round(own, 2),
+                "Opponent roster points" if value_field == "Week points" else "Opponent roster projection": round(theirs, 2),
+                "Difference": round(own-theirs, 2),
+            })
+        st.subheader("Roster scoring by position" if value_field == "Week points" else "Roster projection by position")
+        if position_rows:
+            st.dataframe(pd.DataFrame(position_rows).sort_values("Difference", ascending=False),
+                         hide_index=True, use_container_width=True)
+        st.subheader("Your matchup roster")
+        st.dataframe(pd.DataFrame(own_rows), hide_index=True, use_container_width=True)
+        if page == "Opponent Gameplan":
+            st.subheader("Opponent roster")
+            st.dataframe(pd.DataFrame(opp_rows), hide_index=True, use_container_width=True)
+        if value_field == "Week points":
+            st.caption("Sleeper matchup scoring by position includes currently scored roster points; it is not a projection and may be incomplete while games are in progress.")
+        else:
+            st.caption("Position comparisons sum rostered player projections, including bench players; they are context, not projected starter totals.")
+        return
+
+    if page == "Injury Contingencies":
+        injuries = _nfl_injury_rows(rows)
+        if not injuries:
+            st.success(f"{provider_name} returned no non-standard injury designations for your roster.")
+            return
+        st.subheader("Roster players with injury or availability flags")
+        st.dataframe(pd.DataFrame(injuries), hide_index=True, use_container_width=True)
+        st.subheader("Same-position bench options")
+        swaps = _nfl_same_position_swaps(rows, threshold=0)
+        flagged_positions = {row["Position"] for row in injuries}
+        contingency_rows = [row for row in swaps if row["Position"] in flagged_positions]
+        if contingency_rows:
+            st.dataframe(pd.DataFrame(contingency_rows), hide_index=True, use_container_width=True)
+        else:
+            st.info(
+                "Sleeper does not provide the projections needed to rank same-position alternatives."
+                if league_record.get("provider") == "sleeper"
+                else "No same-position bench alternative has a usable ESPN weekly projection."
+            )
+        st.caption("A designation is not a medical forecast. Confirm active/inactive status before kickoff.")
+        return
+
+    if page in {"Waiver Market", "Roster Value", "Strategy Board", "Move Simulator", "Transaction Portfolio"}:
+        position = "All"
+        if page == "Waiver Market":
+            position = st.selectbox("Position", ["All", "QB", "RB", "WR", "TE", "D/ST", "K"])
+        available = _nfl_free_agent_rows(league, week, position=position, size=75)
+        if available is None:
+            st.error(f"{provider_name} could not return available players for this league.")
+            return
+        upgrades = _nfl_position_upgrades(rows, available)
+        if page == "Waiver Market":
+            st.subheader("Available players")
+            if available:
+                st.dataframe(pd.DataFrame(available), hide_index=True, use_container_width=True)
+            else:
+                st.info("No available players were returned for this position.")
+            if league_record.get("provider") == "sleeper":
+                st.caption("Sleeper's trending-add list is used to order available players. It is interest data, not a projection or endorsement; Sleeper attribution applies.")
+            else:
+                st.caption("Availability and scoring come from ESPN. Check current claims and roster rules before submitting a move.")
+            return
+        if page == "Roster Value":
+            st.subheader("Position replacement comparison")
+            if league_record.get("provider") == "sleeper":
+                st.info("Sleeper does not expose weekly player projections in this adapter, so a projection-based replacement value would be misleading.")
+            elif upgrades:
+                st.dataframe(pd.DataFrame(upgrades), hide_index=True, use_container_width=True)
+            else:
+                st.info("ESPN did not return a same-position available player projected above your roster's lowest player.")
+            st.subheader("Your roster by position")
+            st.dataframe(pd.DataFrame(rows).sort_values(
+                ["Position", "Week projection"], ascending=[True, False], na_position="last"
+            ), hide_index=True, use_container_width=True)
+            return
+        if page == "Strategy Board":
+            injury_rows = _nfl_injury_rows(rows)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Rostered players", len(rows))
+            c2.metric("Injury flags", len(injury_rows))
+            c3.metric("Projection-rated upgrades", "Unavailable" if league_record.get("provider") == "sleeper" else len(upgrades))
+            st.subheader("Highest-value same-position waiver gaps" if league_record.get("provider") == "espn" else "Trending available players")
+            if league_record.get("provider") == "sleeper":
+                trending = [row for row in available if row.get("Trending adds") is not None]
+                if trending:
+                    st.dataframe(pd.DataFrame(trending[:8]), hide_index=True, use_container_width=True)
+                else:
+                    st.info("Sleeper returned no trending adds for the selected window.")
+            elif upgrades:
+                st.dataframe(pd.DataFrame(upgrades[:8]), hide_index=True, use_container_width=True)
+            else:
+                st.info("No clear same-position projection upgrade was returned by ESPN.")
+            if injury_rows:
+                st.subheader("Injury follow-up")
+                st.dataframe(pd.DataFrame(injury_rows), hide_index=True, use_container_width=True)
+            st.caption(
+                "This board uses current ESPN projections and statuses; it does not model future roles or unsourced injury timelines."
+                if league_record.get("provider") == "espn"
+                else "Sleeper trending counts indicate recent add activity, not player quality or expected points. Injury flags come from Sleeper's public player directory."
+            )
+            return
+        if page == "Move Simulator":
+            if league_record.get("provider") == "sleeper":
+                st.info("Projection-based move simulation is unavailable for Sleeper because this API adapter does not receive weekly player projections.")
+                return
+            if not available or not rows:
+                st.info("A rostered player and an ESPN free agent with projections are needed to simulate a move.")
+                return
+            add_names = [row["Player"] for row in available if row["Week projection"] is not None]
+            drop_names = [row["Player"] for row in rows if row["Week projection"] is not None]
+            if not add_names or not drop_names:
+                st.info("ESPN did not return enough weekly projections to compare a move.")
+                return
+            add_name = st.selectbox("Player to add", add_names)
+            drop_name = st.selectbox("Player to drop", drop_names)
+            add_row = next(row for row in available if row["Player"] == add_name)
+            drop_row = next(row for row in rows if row["Player"] == drop_name)
+            weekly_gain = round(add_row["Week projection"] - drop_row["Week projection"], 2)
+            season_gain = None
+            if add_row["Season avg"] is not None and drop_row["Season avg"] is not None:
+                season_gain = round(add_row["Season avg"] - drop_row["Season avg"], 2)
+            left, right = st.columns(2)
+            left.metric("This-week projection change", f"{weekly_gain:+.2f}")
+            right.metric("Season average change", "Not available" if season_gain is None else f"{season_gain:+.2f}")
+            if st.button("Save scenario to Decision Tracker", key="save_nfl_move_scenario"):
+                horizons = pd.DataFrame([
+                    {"Horizon": "1 week", "Projected change": weekly_gain},
+                    {"Horizon": "2 weeks", "Projected change": weekly_gain * 2},
+                    {"Horizon": "4 weeks", "Projected change": weekly_gain * 4},
+                ])
+                decision_id = save_move_decision(team.team_name, add_name, drop_name, horizons, season_gain)
+                st.success(f"Scenario {str(decision_id)[:8]} saved.")
+            st.caption("Multi-week values hold this week's ESPN projection gap constant; they are scenarios, not forecasts.")
+            return
+        if page == "Transaction Portfolio":
+            st.subheader("Best single-step position upgrades")
+            if league_record.get("provider") == "sleeper":
+                st.info("Projection-ranked transaction planning is unavailable for Sleeper because player projections are not supplied.")
+            elif upgrades:
+                st.dataframe(pd.DataFrame(upgrades[:10]), hide_index=True, use_container_width=True)
+            else:
+                st.info("No positive same-position weekly projection changes were found.")
+            st.caption("Each row is an alternative move; the table does not combine several claims or assume claims succeed.")
+            return
+
+    if page == "Player Forecasts":
+        if not rows:
+            st.info(f"{provider_name} returned no roster players.")
+            return
+        st.dataframe(pd.DataFrame(rows).sort_values("Week projection", ascending=False, na_position="last"),
+                     hide_index=True, use_container_width=True)
+        names = [row["Player"] for row in rows]
+        selected = st.selectbox("Inspect a player", names)
+        player = next(player for player in team.roster if player.name == selected)
+        stats = getattr(player, "stats", None) or {}
+        history = []
+        if isinstance(stats, dict):
+            for period, values in stats.items():
+                if not isinstance(values, dict):
+                    continue
+                history.append({
+                    "Week": str(period), "Actual points": _nfl_stat_number(values.get("points")),
+                    f"{provider_name} projection": _nfl_stat_number(values.get("projected_points")),
+                    "Stat line": ", ".join(
+                        f"{key}: {value}" for key, value in (values.get("breakdown") or {}).items()
+                    ),
+                })
+        if history:
+            st.subheader(f"{selected}: weekly {provider_name} data")
+            st.dataframe(pd.DataFrame(history), hide_index=True, use_container_width=True)
+        elif league_record.get("provider") == "sleeper":
+            st.info("Sleeper matchup data includes current fantasy points, but this adapter does not receive a historical player stat line or projection series.")
+        return
+
+    if page == "News and Injuries":
+        injuries = _nfl_injury_rows(rows)
+        if injuries:
+            st.dataframe(pd.DataFrame(injuries), hide_index=True, use_container_width=True)
+        else:
+            st.success(f"No non-standard roster injury statuses were returned by {provider_name}.")
+        st.caption(f"This report reflects {provider_name} injury and availability designations. A separate NFL news feed is not connected.")
+        return
+
+    if page == "Weekly Recap":
+        completed_weeks = list(range(1, max(1, week)))
+        if not completed_weeks:
+            st.info("Weekly recaps will appear after the first completed NFL matchup.")
+            return
+        selected_week = st.selectbox("Completed week", completed_weeks[::-1])
+        recap = _nfl_weekly_rows(league, selected_week)
+        if not recap:
+            st.info(f"{provider_name} did not return the selected week's scoreboard.")
+            return
+        recap_frame = pd.DataFrame(recap)
+        if league_record.get("provider") == "sleeper":
+            recap_frame = recap_frame.rename(columns={
+                "Home": "Team 1", "Home points": "Team 1 points",
+                "Away": "Team 2", "Away points": "Team 2 points",
+            })
+            st.caption("Sleeper supplies matchup pairings but no home/away designation; teams are shown in provider roster order.")
+        st.dataframe(recap_frame, hide_index=True, use_container_width=True)
+        mine = next((row for row in recap if team.team_name in {row["Home"], row["Away"]}), None)
+        if mine and mine["Winner"] != "Pending":
+            my_score = mine["Home points"] if mine["Home"] == team.team_name else mine["Away points"]
+            opp_score = mine["Away points"] if mine["Home"] == team.team_name else mine["Home points"]
+            opponent_name = mine["Away"] if mine["Home"] == team.team_name else mine["Home"]
+            save_weekly_result(season, selected_week, team.team_name, opponent_name, my_score, opp_score)
+            st.info(f"Your Week {selected_week}: {my_score:.1f}–{opp_score:.1f} vs {opponent_name}.")
+        return
+
+    if page == "Power Rankings":
+        ranked = []
+        try:
+            for score, ranked_team in league.power_rankings(week=week):
+                ranked.append({"Rank": len(ranked)+1, "Team": ranked_team.team_name,
+                               "Power score": _nfl_stat_number(score),
+                               "Record": f"{getattr(ranked_team, 'wins', 0)}-{getattr(ranked_team, 'losses', 0)}-{getattr(ranked_team, 'ties', 0)}",
+                               "Points for": _nfl_stat_number(getattr(ranked_team, "points_for", None))})
+        except Exception:
+            ranked = []
+        if not ranked:
+            ordered = sorted(league.teams, key=lambda item: (
+                _nfl_stat_number(getattr(item, "points_for", None)) or 0,
+                getattr(item, "wins", 0),
+            ), reverse=True)
+            ranked = [{"Rank": index, "Team": item.team_name,
+                       "Power score": None,
+                       "Record": f"{getattr(item, 'wins', 0)}-{getattr(item, 'losses', 0)}-{getattr(item, 'ties', 0)}",
+                       "Points for": _nfl_stat_number(getattr(item, "points_for", None))}
+                      for index, item in enumerate(ordered, 1)]
+            st.caption(f"{provider_name} power scores were unavailable; fallback ranks sort by points for and wins.")
+        st.dataframe(pd.DataFrame(ranked), hide_index=True, use_container_width=True)
+        return
+
+    if page == "League Scout":
+        scout = []
+        current_scores = {}
+        if league_record.get("provider") == "sleeper":
+            for matchup_row in _nfl_scoreboard(league, week):
+                for side, score_field in (("home_team", "home_score"), ("away_team", "away_score")):
+                    matchup_team = getattr(matchup_row, side, None)
+                    if matchup_team is not None:
+                        current_scores[matchup_team.team_id] = _nfl_stat_number(getattr(matchup_row, score_field, None))
+        for item in league.teams:
+            team_rows = _nfl_roster_rows(getattr(item, "roster", []), week)
+            projections = [row["Week projection"] for row in team_rows if row["Week projection"] is not None]
+            scout.append({
+                "Team": item.team_name,
+                "Record": f"{getattr(item, 'wins', 0)}-{getattr(item, 'losses', 0)}-{getattr(item, 'ties', 0)}",
+                "Points for": _nfl_stat_number(getattr(item, "points_for", None)),
+                "Current matchup points" if league_record.get("provider") == "sleeper" else "Weekly roster projection": (
+                    current_scores.get(item.team_id) if league_record.get("provider") == "sleeper"
+                    else round(sum(projections), 2) if projections else None
+                ),
+                "Roster players": len(team_rows),
+                "Injury flags": len(_nfl_injury_rows(team_rows)),
+            })
+        scout_frame = pd.DataFrame(scout)
+        score_column = "Current matchup points" if league_record.get("provider") == "sleeper" else "Weekly roster projection"
+        st.dataframe(scout_frame.sort_values(score_column, ascending=False, na_position="last"),
+                     hide_index=True, use_container_width=True)
+        st.caption(
+            "Current matchup points are live scoreboard totals and may be incomplete while games are active."
+            if league_record.get("provider") == "sleeper"
+            else "Weekly roster projection includes bench players and is a depth comparison, not a legal-starting-lineup forecast."
+        )
+        return
+
+    if page == "Draft Review":
+        draft = _nfl_draft_rows(league)
+        if draft:
+            st.dataframe(pd.DataFrame(draft), hide_index=True, use_container_width=True)
+        else:
+            st.info(f"{provider_name} did not return draft picks for this league.")
+        return
+
+    if page in {"Playoff Planner", "Bye Week Planner"}:
+        if league_record.get("provider") == "sleeper":
+            st.info("The Sleeper league API does not include player-by-player weekly schedules in this adapter yet, so bye-week and playoff schedule counts are unavailable here.")
+            return
+        settings = getattr(league, "settings", None)
+        current = week
+        if page == "Bye Week Planner":
+            selected_week = st.selectbox("NFL scoring week", list(range(1, 19)), index=min(17, max(0, week-1)))
+            no_game = []
+            for player in getattr(team, "roster", []):
+                if _nfl_schedule_entry(player, selected_week) is None:
+                    no_game.append({"Player": player.name, "Position": getattr(player, "position", "Unknown"),
+                                    "NFL team": getattr(player, "proTeam", "Unknown"),
+                                    "Reason": "ESPN schedule has no game entry for this week"})
+            st.subheader(f"Roster players with no listed game in Week {selected_week}")
+            if no_game:
+                st.dataframe(pd.DataFrame(no_game), hide_index=True, use_container_width=True)
+            else:
+                st.success("Every rostered player's ESPN schedule has a game entry for this week.")
+            st.caption("A missing schedule entry can mean a bye or incomplete ESPN schedule data; verify before making a move.")
+            return
+        playoff_start = int(getattr(settings, "reg_season_count", current) or current) + 1
+        playoff_length = int(getattr(settings, "playoff_matchup_period_length", 1) or 1)
+        last_week = min(18, playoff_start + max(playoff_length * 4, 4) - 1)
+        planning = []
+        for player in getattr(team, "roster", []):
+            scheduled = [period for period in range(max(current, playoff_start), last_week+1)
+                         if _nfl_schedule_entry(player, period) is not None]
+            planning.append({"Player": player.name, "Position": getattr(player, "position", "Unknown"),
+                             "NFL team": getattr(player, "proTeam", "Unknown"),
+                             "Listed playoff weeks": len(scheduled),
+                             "Weeks with game": ", ".join(map(str, scheduled)) or "None listed",
+                             "Season avg": _nfl_stat_number(getattr(player, "avg_points", None))})
+        st.caption(f"{provider_name} league settings: regular season through Week {playoff_start-1}; playoff matchup length {playoff_length} week(s).")
+        st.dataframe(pd.DataFrame(planning), hide_index=True, use_container_width=True)
+        st.caption("Schedule coverage and season averages are planning context, not a guarantee of playoff availability or production.")
+        return
+
+    if page == "Transactions":
+        active, recent, error = _nfl_transaction_rows(league, team)
+        if error:
+            st.warning(f"{provider_name} transaction activity was unavailable.")
+            st.caption(f"Activity issue: {error}")
+            return
+        first, second = st.tabs([f"Active claims ({len(active)})", "Recent results"])
+        with first:
+            if active:
+                st.dataframe(pd.DataFrame(active), hide_index=True, use_container_width=True)
+            else:
+                st.info("No active claims were returned for this team.")
+        with second:
+            if recent:
+                st.dataframe(pd.DataFrame(recent), hide_index=True, use_container_width=True)
+            else:
+                st.info("No recent completed moves were returned.")
+        if league_record.get("provider") == "sleeper":
+            st.caption("Sleeper returns processed transaction history here. Active claim details are not exposed through this connection; submit moves in Sleeper.")
+        else:
+            st.caption("Read-only transaction history. Use ESPN to place, reorder, or cancel claims.")
+        return
+
+    if page == "League Scoring":
+        scoring = getattr(getattr(league, "settings", None), "scoring_format", None) or []
+        if scoring:
+            st.dataframe(pd.DataFrame(scoring), hide_index=True, use_container_width=True)
+        else:
+            st.info(f"{provider_name} did not expose custom scoring details for this league.")
+        provider_name = "Sleeper" if league_record.get("provider") == "sleeper" else "ESPN"
+        st.caption(f"Scoring rules are read from {provider_name}. Scores and any available projections use the selected provider's league settings.")
+        return
+
+    st.info("This NFL view is not available yet.")
 
 
 def render_new_espn_connection(user_id, expanded=True):
@@ -2519,6 +3223,91 @@ def render_new_espn_connection(user_id, expanded=True):
         st.rerun()
 
 
+def render_new_sleeper_connection(user_id):
+    with st.sidebar.expander("Connect a Sleeper NFL league"):
+        st.caption("Sleeper's documented public league API needs no cookie or API key. This connection is read-only.")
+        current_year = datetime.now().year
+        with st.form("find_sleeper_leagues"):
+            username = st.text_input("Sleeper username", key="sleeper_username")
+            season = st.number_input(
+                "NFL season", min_value=2017, max_value=current_year + 1,
+                value=current_year, step=1, key="sleeper_season",
+            )
+            find_submitted = st.form_submit_button("Find my NFL leagues")
+        if find_submitted:
+            try:
+                user, leagues = find_user_leagues(username, int(season))
+                st.session_state["sleeper_found_leagues"] = {
+                    "username": username.strip(),
+                    "user_id": str(user["user_id"]),
+                    "season": int(season),
+                    "leagues": leagues,
+                }
+                if not leagues:
+                    st.info(f"No Sleeper NFL leagues were returned for {int(season)}.")
+            except Exception as error:
+                st.session_state.pop("sleeper_found_leagues", None)
+                st.error("Sleeper could not find the username or its NFL leagues.")
+                st.caption(f"Sleeper lookup issue: {type(error).__name__}")
+
+        found = st.session_state.get("sleeper_found_leagues")
+        if not found or not found.get("leagues"):
+            return
+        labels = {
+            str(item.get("league_id")): (
+                f"{item.get('name') or 'Sleeper league'} · {item.get('season')} · "
+                f"{item.get('total_rosters', '?')} teams"
+            )
+            for item in found["leagues"]
+        }
+        selected = st.selectbox(
+            "Choose a Sleeper league", list(labels), format_func=labels.get,
+            key="sleeper_selected_league",
+        )
+        if st.button("Connect selected Sleeper league", key="save_sleeper_league"):
+            selected_league = next(
+                item for item in found["leagues"]
+                if str(item.get("league_id")) == str(selected)
+            )
+            connection_id = None
+            try:
+                connect_to_sleeper_league(
+                    int(found["season"]), selected,
+                    credentials={"username": found["username"], "user_id": found["user_id"]},
+                )
+                connection_id = account_store.create_provider_connection(
+                    user_id, "sleeper",
+                    {"username": found["username"], "user_id": found["user_id"]},
+                    label=f"Sleeper · {selected_league.get('name') or 'NFL league'}",
+                )
+                league_record_id = account_store.create_league(
+                    user_id, connection_id, str(selected), "nfl", int(found["season"]),
+                    name=str(selected_league.get("name") or "Sleeper NFL league"),
+                    scoring_settings=selected_league.get("scoring_settings") or {},
+                    roster_settings={"roster_positions": selected_league.get("roster_positions") or []},
+                )
+                st.session_state["active_league_selector"] = league_record_id
+                st.session_state.pop("sleeper_found_leagues", None)
+                load_league.clear()
+                load_previous_league.clear()
+                st.rerun()
+            except Exception as error:
+                if connection_id:
+                    try:
+                        account_store.disconnect_provider(user_id, connection_id)
+                    except Exception:
+                        pass
+                st.error("Sleeper league validation or save failed.")
+                st.caption(f"Sleeper connection issue: {type(error).__name__}")
+
+
+def render_yahoo_connection_status():
+    with st.sidebar.expander("Yahoo Fantasy connection"):
+        st.info("Yahoo support needs an approved Yahoo Fantasy Sports API application and OAuth credentials before the app can connect.")
+        st.markdown("[Request Yahoo Fantasy API access](https://sports.yahoo.com/developer/access/)")
+        st.caption("The Yahoo connector will request read-only Fantasy Sports access. Do not paste Yahoo client secrets or tokens into this form.")
+
+
 def render_credential_refresh(user_id, league_record, connection_id):
     with st.sidebar.expander("Update ESPN cookies"):
         st.caption("Use this after ESPN expires the saved session cookies.")
@@ -2559,7 +3348,7 @@ def render_credential_refresh(user_id, league_record, connection_id):
 
 
 st.sidebar.title("League Settings")
-source = st.sidebar.radio("Data source", ["ESPN connection", "Manual fallback"])
+source = st.sidebar.radio("League data", ["Connected leagues", "Manual fallback"])
 st.sidebar.caption("Data refreshes every 2.5 minutes. This site is read-only.")
 if APP_ENV != "development" and st.sidebar.button("Sign out"):
     stop_user_workers(USER_ID)
@@ -2574,26 +3363,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-NAVIGATION = {
-    "ROSTER": ["Championship Dashboard"],
-    "MATCHUP": ["Matchup Center", "Opponent Gameplan", "Lineup Planner", "Injury Contingencies"],
-    "PLAYERS": ["Waiver Market", "Roster Value", "Transactions", "Player Forecasts", "News"],
-    "LEAGUE": ["Weekly Recap", "Power Rankings", "League Scout", "Draft Review"],
-    "GM HUB": ["Strategy Board", "Playoff Planner", "Move Simulator", "Streaming Planner", "Transaction Portfolio", "Decision Tracker", "Accuracy Lab", "Scoring Check"],
-    "NFL": ["Football Center"],
-}
-primary_page = st.radio(
-    "Main section", list(NAVIGATION), horizontal=True,
-    label_visibility="collapsed", key="main_navigation",
-)
-section_pages = NAVIGATION[primary_page]
-if len(section_pages) == 1:
-    page = section_pages[0]
-else:
-    page = st.radio(
-        "Section page", section_pages, horizontal=True,
-        label_visibility="collapsed", key=f"subnav_{primary_page}",
-    )
 if source == "Manual fallback":
     st.title("🏀 Fantasy Basketball Advisor")
     updated_caption()
@@ -2623,12 +3392,37 @@ except Exception as error:
 
 if not available_leagues:
     render_new_espn_connection(USER_ID)
-    st.info("Connect an ESPN basketball or football league to load your private roster and matchup data.")
+    render_new_sleeper_connection(USER_ID)
+    render_yahoo_connection_status()
+    st.info("Connect an ESPN or Sleeper NFL league to load your private roster and matchup data.")
+    st.stop()
+
+try:
+    for league_record in available_leagues:
+        connection_record = account_store.get_provider_connection(
+            USER_ID, league_record["provider_connection_id"]
+        )
+        league_record["provider"] = connection_record["provider"] if connection_record else ""
+    available_leagues = [
+        row for row in available_leagues
+        if row.get("provider") in {"espn", "sleeper"}
+        and (row["provider"] != "sleeper" or row["sport"] == "nfl")
+    ]
+except Exception as error:
+    st.error("Your provider connections could not be checked.")
+    st.caption(f"Connection issue: {type(error).__name__}")
+    st.stop()
+
+if not available_leagues:
+    render_new_espn_connection(USER_ID)
+    render_new_sleeper_connection(USER_ID)
+    render_yahoo_connection_status()
+    st.info("No supported connected leagues were found. Add an ESPN league or a Sleeper NFL league.")
     st.stop()
 
 league_by_id = {item["id"]: item for item in available_leagues}
 league_labels = {
-    item["id"]: f"{item['name'] or 'ESPN league'} · {item['sport'].upper()} · {item['season']}"
+    item["id"]: f"{item['name'] or item['provider'].title() + ' league'} · {item['sport'].upper()} · {item['season']} · {item['provider'].title()}"
     for item in available_leagues
 }
 active_league_key = "active_league_selector"
@@ -2643,7 +3437,7 @@ ACTIVE_LEAGUE_ID = st.sidebar.selectbox(
 active_league_record = league_by_id[ACTIVE_LEAGUE_ID]
 connection_id = active_league_record["provider_connection_id"]
 connection = account_store.get_provider_connection(USER_ID, connection_id)
-if connection is None or connection["provider"] != "espn":
+if connection is None or connection["provider"] != active_league_record["provider"]:
     st.error("The selected league connection is unavailable for this account.")
     st.stop()
 connection_version = (
@@ -2651,8 +3445,11 @@ connection_version = (
     if connection.get("updated_at") else str(connection.get("created_at", ""))
 )
 render_new_espn_connection(USER_ID, expanded=False)
-render_credential_refresh(USER_ID, active_league_record, connection_id)
-if st.sidebar.button("Disconnect selected ESPN league", key=f"disconnect_{ACTIVE_LEAGUE_ID}"):
+render_new_sleeper_connection(USER_ID)
+render_yahoo_connection_status()
+if active_league_record["provider"] == "espn":
+    render_credential_refresh(USER_ID, active_league_record, connection_id)
+if st.sidebar.button(f"Disconnect selected {active_league_record['provider'].title()} league", key=f"disconnect_{ACTIVE_LEAGUE_ID}"):
     account_store.disconnect_provider(USER_ID, connection_id)
     st.session_state.pop(active_league_key, None)
     st.session_state.pop(f"selected_team_{ACTIVE_LEAGUE_ID}", None)
@@ -2671,9 +3468,12 @@ try:
         USER_ID, ACTIVE_LEAGUE_ID, connection_id, connection_version,
         active_league_record["provider_league_id"], SESSION_CACHE_KEY,
         int(active_league_record["season"]), active_league_record["sport"],
+        active_league_record["provider"],
     )
 except Exception as error:
-    st.error("ESPN could not be reached for this saved league. Update its cookies or use Manual fallback.")
+    provider_name = active_league_record["provider"].title()
+    recovery = "Update its cookies" if active_league_record["provider"] == "espn" else "check that the league is still public"
+    st.error(f"{provider_name} could not be reached for this saved league. You can {recovery}, or use Manual fallback.")
     st.caption(f"Connection issue: {type(error).__name__}")
     st.stop()
 
@@ -2682,11 +3482,38 @@ selected_name = st.sidebar.selectbox(
     "My team", team_names, key=f"selected_team_{ACTIVE_LEAGUE_ID}"
 )
 team = next(team for team in league.teams if team.team_name == selected_name)
+
+NBA_NAVIGATION = {
+    "ROSTER": ["Championship Dashboard"],
+    "MATCHUP": ["Matchup Center", "Opponent Gameplan", "Lineup Planner", "Injury Contingencies"],
+    "PLAYERS": ["Waiver Market", "Roster Value", "Transactions", "Player Forecasts", "News"],
+    "LEAGUE": ["Weekly Recap", "Power Rankings", "League Scout", "Draft Review"],
+    "GM HUB": ["Strategy Board", "Playoff Planner", "Move Simulator", "Streaming Planner", "Transaction Portfolio", "Decision Tracker", "Accuracy Lab", "Scoring Check"],
+}
+NFL_NAVIGATION = {
+    "ROSTER": ["Football Center", "Weekly Lineup"],
+    "MATCHUP": ["Matchup Center", "Opponent Gameplan", "Injury Contingencies"],
+    "PLAYERS": ["Waiver Market", "Roster Value", "Player Forecasts", "News and Injuries", "Transactions"],
+    "LEAGUE": ["Weekly Recap", "Power Rankings", "League Scout", "Draft Review"],
+    "GM HUB": ["Strategy Board", "Playoff Planner", "Bye Week Planner", "Move Simulator", "Transaction Portfolio", "Decision Tracker", "Accuracy Lab", "League Scoring"],
+}
+sport = active_league_record["sport"]
+navigation = NFL_NAVIGATION if sport == "nfl" else NBA_NAVIGATION
+primary_page = st.radio(
+    "Main section", list(navigation), horizontal=True,
+    label_visibility="collapsed", key=f"main_navigation_{sport}",
+)
+section_pages = navigation[primary_page]
+if len(section_pages) == 1:
+    page = section_pages[0]
+else:
+    page = st.radio(
+        "Section page", section_pages, horizontal=True,
+        label_visibility="collapsed", key=f"subnav_{sport}_{primary_page}",
+    )
+
 if active_league_record["sport"] == "nfl":
-    if page == "Football Center":
-        render_nfl_dashboard(league, team, active_league_record)
-    else:
-        st.info("This is an NFL league. Open the NFL tab and choose Football Center; the other sections currently cover basketball.")
+    render_nfl_page(page, league, team, active_league_record)
     st.stop()
 
 schedule = None

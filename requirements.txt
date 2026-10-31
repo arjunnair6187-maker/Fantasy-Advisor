@@ -5,6 +5,7 @@ espn-api
 nba_api
 python-dotenv
 pandas
+requests>=2.31,<3
 feedparser
 pytest
 SQLAlchemy>=2.0,<3
