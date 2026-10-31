@@ -3161,7 +3161,17 @@ def render_nfl_page(page, league, team, league_record):
     st.info("This NFL view is not available yet.")
 
 
+def _capture_espn_cookies(destination_key, espn_s2_key, swid_key):
+    st.session_state[destination_key] = {
+        "espn_s2": st.session_state.get(espn_s2_key, ""),
+        "swid": st.session_state.get(swid_key, ""),
+    }
+    st.session_state.pop(espn_s2_key, None)
+    st.session_state.pop(swid_key, None)
+
+
 def render_new_espn_connection(user_id, expanded=True):
+    submitted_credentials = st.session_state.pop("_submitted_new_espn_cookies", {})
     with st.sidebar.expander("Connect an ESPN fantasy league", expanded=expanded):
         st.caption("Cookies are sent only after you submit this form and are encrypted before they are saved.")
         with st.form("new_espn_connection"):
@@ -3172,13 +3182,18 @@ def render_new_espn_connection(user_id, expanded=True):
             espn_s2 = st.text_input("espn_s2 cookie", type="password", key="new_espn_s2")
             swid = st.text_input("SWID cookie", type="password", key="new_espn_swid")
             label = st.text_input("Connection label", value="My ESPN league", key="new_espn_label")
-            submitted = st.form_submit_button("Validate and save connection")
+            submitted = st.form_submit_button(
+                "Validate and save connection",
+                on_click=_capture_espn_cookies,
+                args=("_submitted_new_espn_cookies", "new_espn_s2", "new_espn_swid"),
+            )
         if not submitted:
             return
-        credentials = {"espn_s2": espn_s2.strip(), "swid": swid.strip()}
+        credentials = {
+            "espn_s2": str(submitted_credentials.get("espn_s2") or "").strip(),
+            "swid": str(submitted_credentials.get("swid") or "").strip(),
+        }
         if not league_id.strip() or not all(credentials.values()):
-            st.session_state.pop("new_espn_s2", None)
-            st.session_state.pop("new_espn_swid", None)
             st.error("Enter the league ID and both required cookies.")
             return
         sport = "nfl" if sport_label == "Football" else "nba"
@@ -3188,8 +3203,6 @@ def render_new_espn_connection(user_id, expanded=True):
             league = connector(year=season, credentials=credentials,
                                league_id=league_id.strip())
         except Exception as error:
-            st.session_state.pop("new_espn_s2", None)
-            st.session_state.pop("new_espn_swid", None)
             st.error("The ESPN league check failed. The connection was not saved.")
             st.caption(f"ESPN check issue: {type(error).__name__}")
             return
@@ -3204,9 +3217,7 @@ def render_new_espn_connection(user_id, expanded=True):
                 user_id, connection_id, league_id.strip(), sport,
                 season, name=league_name,
             )
-            st.session_state["active_league_selector"] = league_record_id
-            st.session_state.pop("new_espn_s2", None)
-            st.session_state.pop("new_espn_swid", None)
+            st.session_state["pending_active_league_id"] = league_record_id
             load_league.clear()
             load_previous_league.clear()
         except Exception as error:
@@ -3215,8 +3226,6 @@ def render_new_espn_connection(user_id, expanded=True):
                     account_store.disconnect_provider(user_id, connection_id)
                 except Exception:
                     pass
-            st.session_state.pop("new_espn_s2", None)
-            st.session_state.pop("new_espn_swid", None)
             st.error("The ESPN league check succeeded, but the app could not save the connection.")
             st.caption(f"Save issue: {type(error).__name__}")
             return
@@ -3286,7 +3295,7 @@ def render_new_sleeper_connection(user_id):
                     scoring_settings=selected_league.get("scoring_settings") or {},
                     roster_settings={"roster_positions": selected_league.get("roster_positions") or []},
                 )
-                st.session_state["active_league_selector"] = league_record_id
+                st.session_state["pending_active_league_id"] = league_record_id
                 st.session_state.pop("sleeper_found_leagues", None)
                 load_league.clear()
                 load_previous_league.clear()
@@ -3309,18 +3318,24 @@ def render_yahoo_connection_status():
 
 
 def render_credential_refresh(user_id, league_record, connection_id):
+    submitted_credentials = st.session_state.pop("_submitted_refresh_espn_cookies", {})
     with st.sidebar.expander("Update ESPN cookies"):
         st.caption("Use this after ESPN expires the saved session cookies.")
         with st.form(f"refresh_espn_{league_record['id']}"):
             espn_s2 = st.text_input("New espn_s2 cookie", type="password", key="refresh_espn_s2")
             swid = st.text_input("New SWID cookie", type="password", key="refresh_espn_swid")
-            submitted = st.form_submit_button("Validate and replace cookies")
+            submitted = st.form_submit_button(
+                "Validate and replace cookies",
+                on_click=_capture_espn_cookies,
+                args=("_submitted_refresh_espn_cookies", "refresh_espn_s2", "refresh_espn_swid"),
+            )
         if not submitted:
             return
-        credentials = {"espn_s2": espn_s2.strip(), "swid": swid.strip()}
+        credentials = {
+            "espn_s2": str(submitted_credentials.get("espn_s2") or "").strip(),
+            "swid": str(submitted_credentials.get("swid") or "").strip(),
+        }
         if not all(credentials.values()):
-            st.session_state.pop("refresh_espn_s2", None)
-            st.session_state.pop("refresh_espn_swid", None)
             st.error("Enter both current ESPN cookies.")
             return
         try:
@@ -3334,13 +3349,9 @@ def render_credential_refresh(user_id, league_record, connection_id):
                 user_id, connection_id, credentials,
             ):
                 raise LookupError("Connection not found for this user.")
-            st.session_state.pop("refresh_espn_s2", None)
-            st.session_state.pop("refresh_espn_swid", None)
             load_league.clear()
             load_previous_league.clear()
         except Exception as error:
-            st.session_state.pop("refresh_espn_s2", None)
-            st.session_state.pop("refresh_espn_swid", None)
             st.error("ESPN could not verify the replacement cookies. The saved connection was not changed.")
             st.caption(f"Connection issue: {type(error).__name__}")
             return
@@ -3426,7 +3437,10 @@ league_labels = {
     for item in available_leagues
 }
 active_league_key = "active_league_selector"
-if st.session_state.get(active_league_key) not in league_by_id:
+pending_active_league_id = st.session_state.pop("pending_active_league_id", None)
+if pending_active_league_id in league_by_id:
+    st.session_state[active_league_key] = pending_active_league_id
+elif st.session_state.get(active_league_key) not in league_by_id:
     st.session_state[active_league_key] = available_leagues[0]["id"]
 ACTIVE_LEAGUE_ID = st.sidebar.selectbox(
     "Connected league",
@@ -3451,7 +3465,6 @@ if active_league_record["provider"] == "espn":
     render_credential_refresh(USER_ID, active_league_record, connection_id)
 if st.sidebar.button(f"Disconnect selected {active_league_record['provider'].title()} league", key=f"disconnect_{ACTIVE_LEAGUE_ID}"):
     account_store.disconnect_provider(USER_ID, connection_id)
-    st.session_state.pop(active_league_key, None)
     st.session_state.pop(f"selected_team_{ACTIVE_LEAGUE_ID}", None)
     load_league.clear()
     load_previous_league.clear()
