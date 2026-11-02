@@ -12,17 +12,28 @@ import requests
 
 NBA_SEASON = "2026-27"
 CACHE_PATH = Path(__file__).with_name("nba_schedule_cache.json")
-NBA_CDN_URL = "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_1.json"
+NBA_CDN_URLS = (
+    "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json",
+    "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_1.json",
+)
+_FETCH_RETRY_AFTER = 0.0
+_LAST_FETCH_ERROR = None
 
 
 def _load_cached_frames():
-    if not CACHE_PATH.exists():
+    try:
+        if not CACHE_PATH.exists():
+            return None
+        payload = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+        saved_at = datetime.fromisoformat(payload["saved_at"])
+        if datetime.now() - saved_at > timedelta(days=7):
+            return None
+        schedule, weeks = pd.DataFrame(payload["schedule"]), pd.DataFrame(payload["weeks"])
+        if schedule.empty or weeks.empty:
+            return None
+        return schedule, weeks
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
-    payload = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
-    saved_at = datetime.fromisoformat(payload["saved_at"])
-    if datetime.now() - saved_at > timedelta(days=7):
-        return None
-    return pd.DataFrame(payload["schedule"]), pd.DataFrame(payload["weeks"])
 
 
 def _save_cached_frames(schedule, weeks):
@@ -31,49 +42,65 @@ def _save_cached_frames(schedule, weeks):
         "schedule": schedule.where(pd.notna(schedule), None).to_dict(orient="records"),
         "weeks": weeks.where(pd.notna(weeks), None).to_dict(orient="records"),
     }
-    CACHE_PATH.write_text(json.dumps(payload, default=str), encoding="utf-8")
+    try:
+        CACHE_PATH.write_text(json.dumps(payload, default=str), encoding="utf-8")
+    except OSError:
+        # Streamlit Cloud may mount the source tree read-only. The decorated
+        # app loaders still keep a process-local copy after a successful fetch.
+        pass
 
 
 def _fetch_schedule_frames():
-    """Retry NBA.com, then safely fall back to a recent local copy."""
+    """Try NBA Stats, current NBA CDN variants, then a recent local copy."""
+    global _FETCH_RETRY_AFTER, _LAST_FETCH_ERROR
+    if time.monotonic() < _FETCH_RETRY_AFTER:
+        raise RuntimeError("NBA schedule sources are temporarily unavailable; retrying after a short pause.") from _LAST_FETCH_ERROR
     last_error = None
     try:
         frames = ScheduleLeagueV2(season=NBA_SEASON, timeout=20).get_data_frames()
         schedule, weeks = frames[0].copy(), frames[1].copy()
         _save_cached_frames(schedule, weeks)
+        _FETCH_RETRY_AFTER, _LAST_FETCH_ERROR = 0.0, None
         return schedule, weeks, "live"
     except Exception as error:
         last_error = error
         time.sleep(1)
-    try:
-        response = requests.get(
-            NBA_CDN_URL,
-            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.nba.com/"},
-            timeout=20,
-        )
-        response.raise_for_status()
-        root = response.json().get("leagueSchedule", {})
-        game_rows = []
-        for game_date in root.get("gameDates", []):
-            for game in game_date.get("games", []):
-                game_rows.append({
-                    "gameDateEst": game.get("gameDateTimeEst") or game_date.get("gameDate"),
-                    "gameLabel": game.get("gameLabel", ""),
-                    "homeTeam_teamTricode": game.get("homeTeam", {}).get("teamTricode"),
-                    "awayTeam_teamTricode": game.get("awayTeam", {}).get("teamTricode"),
-                })
-        week_rows = root.get("weeks") or root.get("seasonWeeks") or []
-        schedule, weeks = pd.DataFrame(game_rows), pd.DataFrame(week_rows)
-        required = {"weekNumber", "weekName", "startDate", "endDate"}
-        if schedule.empty or weeks.empty or not required.issubset(weeks.columns):
-            raise ValueError("NBA CDN schedule format was incomplete.")
-        _save_cached_frames(schedule, weeks)
-        return schedule, weeks, "NBA CDN fallback"
-    except Exception as error:
-        last_error = error
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://www.nba.com/",
+        "Origin": "https://www.nba.com",
+        "Accept": "application/json,text/plain,*/*",
+    }
+    for cdn_url in NBA_CDN_URLS:
+        try:
+            response = requests.get(cdn_url, headers=headers, timeout=12)
+            response.raise_for_status()
+            root = response.json().get("leagueSchedule", {})
+            game_rows = []
+            for game_date in root.get("gameDates", []):
+                for game in game_date.get("games", []):
+                    game_rows.append({
+                        "gameDateEst": game.get("gameDateTimeEst") or game_date.get("gameDate"),
+                        "gameLabel": game.get("gameLabel", ""),
+                        "homeTeam_teamTricode": game.get("homeTeam", {}).get("teamTricode"),
+                        "awayTeam_teamTricode": game.get("awayTeam", {}).get("teamTricode"),
+                    })
+            week_rows = root.get("weeks") or root.get("seasonWeeks") or []
+            schedule, weeks = pd.DataFrame(game_rows), pd.DataFrame(week_rows)
+            required = {"weekNumber", "weekName", "startDate", "endDate"}
+            if schedule.empty or weeks.empty or not required.issubset(weeks.columns):
+                raise ValueError("NBA CDN schedule format was incomplete.")
+            _save_cached_frames(schedule, weeks)
+            _FETCH_RETRY_AFTER, _LAST_FETCH_ERROR = 0.0, None
+            return schedule, weeks, "NBA CDN fallback"
+        except Exception as error:
+            last_error = error
     cached = _load_cached_frames()
     if cached is not None:
+        _FETCH_RETRY_AFTER, _LAST_FETCH_ERROR = 0.0, None
         return cached[0], cached[1], "cached"
+    _LAST_FETCH_ERROR = last_error
+    _FETCH_RETRY_AFTER = time.monotonic() + 300
     raise RuntimeError("NBA schedule sources timed out and no saved schedule is available.") from last_error
 
 

@@ -1757,17 +1757,32 @@ def render_news(league, previous_league, team, matchup, schedule):
 def render_strategy(league, previous_league, team):
     hero("Championship planning", "Strategy Board", "A living plan for today, the next four weeks, and the full season. Projections never replace a final injury check.")
     updated_caption()
+    schedule_issue = None
     with st.spinner("Building league strategy and four-week forecasts..."):
         active_period = int(getattr(league, "currentMatchupPeriod", 1) or 1)
         power, history, team_rows = calculate_league_intelligence(
             CACHE_SCOPE, active_period, league, previous_league
         )
         save_power_snapshot(active_period, power)
-        schedules = load_upcoming_schedules()
+        try:
+            schedules = load_upcoming_schedules()
+        except Exception as error:
+            schedules = []
+            schedule_issue = type(error).__name__
         forecasts, details = matchup_forecasts(league, team, schedules, previous_league, team_rows)
         saved_before = forecast_history(ESPN_SEASON_YEAR, team.team_name)
         _, prior_accuracy = projection_accuracy(league, team, saved_before)
-        current_schedule = schedules[0] if schedules else load_schedule()
+        current_schedule = schedules[0] if schedules else None
+        if current_schedule is None:
+            try:
+                current_schedule = load_schedule()
+            except Exception as error:
+                schedule_issue = schedule_issue or type(error).__name__
+                current_schedule = {
+                    "game_counts": pd.DataFrame(columns=["NBA team", "Games"]),
+                    "games": pd.DataFrame(),
+                    "source": "unavailable",
+                }
         try:
             pending_claims = active_waiver_claims(league, team.team_id)
         except Exception:
@@ -1776,6 +1791,12 @@ def render_strategy(league, previous_league, team):
             league, team, power, team_rows, current_schedule["game_counts"],
             previous_league, pending_claims=pending_claims,
         )
+        if schedule_issue and not waiver_fixes.empty:
+            for column in ("This-week gain", "Add games", "Drop games"):
+                if column in waiver_fixes:
+                    waiver_fixes[column] = pd.NA
+    if schedule_issue:
+        st.warning("The NBA schedule is temporarily unavailable. Roster-strength analysis remains available, but matchup forecasts and games-this-week estimates are omitted until the schedule source responds.")
     mine = power[power["Team"] == team.team_name]
     if not mine.empty:
         row = mine.iloc[0]
@@ -1809,10 +1830,16 @@ def render_strategy(league, previous_league, team):
         else:
             st.dataframe(waiver_fixes, hide_index=True, use_container_width=True)
             best = waiver_fixes.iloc[0]
-            st.success(
-                f"Best immediate move: add {best['Add']} for {best['Drop']}. Estimated change: "
-                f"{best['FP/G gain']:+.1f} FP/G and {best['This-week gain']:+.1f} points this week."
-            )
+            if schedule_issue:
+                st.success(
+                    f"Best roster-rate upgrade: add {best['Add']} for {best['Drop']}. "
+                    f"Estimated change: {best['FP/G gain']:+.1f} FP/G. Weekly game volume is unavailable."
+                )
+            else:
+                st.success(
+                    f"Best immediate move: add {best['Add']} for {best['Drop']}. Estimated change: "
+                    f"{best['FP/G gain']:+.1f} FP/G and {best['This-week gain']:+.1f} points this week."
+                )
     with right:
         st.subheader("Trade targets")
         if trade_fixes.empty:
@@ -1853,10 +1880,16 @@ def render_strategy(league, previous_league, team):
             c.metric("Opponent", one_week["hardest_opponent"])
         if not waiver_fixes.empty:
             immediate = waiver_fixes.iloc[0]
-            st.success(
-                f"Best 1-week action: claim {immediate['Add']} for {immediate['Drop']}. "
-                f"Estimated current-week change: {immediate['This-week gain']:+.1f} points."
-            )
+            if schedule_issue:
+                st.success(
+                    f"Best roster-rate move: claim {immediate['Add']} for {immediate['Drop']}. "
+                    f"Estimated change: {immediate['FP/G gain']:+.1f} FP/G; weekly schedule estimate unavailable."
+                )
+            else:
+                st.success(
+                    f"Best 1-week action: claim {immediate['Add']} for {immediate['Drop']}. "
+                    f"Estimated current-week change: {immediate['This-week gain']:+.1f} points."
+                )
         else:
             st.info("No measurable one-week waiver upgrade is available. Protect active games and avoid a low-value churn move.")
         short_view = weaknesses[["Position", "Short-term FP/G", "League average", "Short-term gap", "Short-term status", "League rank"]]
@@ -1927,7 +1960,10 @@ def render_strategy(league, previous_league, team):
     st.dataframe(pd.DataFrame(strategy_plan(power, team.team_name)), hide_index=True, use_container_width=True)
     st.subheader("Next four matchups")
     if forecasts.empty:
-        st.info("ESPN has not supplied future fantasy matchups yet.")
+        st.info(
+            "Schedule data could not be loaded, so future matchup forecasts are paused."
+            if schedule_issue else "ESPN has not supplied future fantasy matchups yet."
+        )
     else:
         if prior_accuracy["mae"] is not None:
             error = prior_accuracy["mae"]
