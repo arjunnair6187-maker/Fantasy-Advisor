@@ -21,6 +21,22 @@ ESPN_SCHEDULE_CHUNK_DAYS = 45
 ESPN_SCHEDULE_TIMEOUT_SECONDS = 10
 _FETCH_RETRY_AFTER = 0.0
 _LAST_FETCH_ERROR = None
+_LAST_FETCH_DIAGNOSTIC = ""
+
+
+def _schedule_error_detail(source, error):
+    """Return provider/status diagnostics without response bodies or secrets."""
+    response = getattr(error, "response", None)
+    status = getattr(response, "status_code", None)
+    if status is not None:
+        return f"{source}: HTTP {status}"
+    if isinstance(error, requests.Timeout):
+        return f"{source}: timeout"
+    if isinstance(error, ValueError):
+        return f"{source}: invalid or empty schedule response"
+    if isinstance(error, requests.RequestException):
+        return f"{source}: {type(error).__name__}"
+    return f"{source}: {type(error).__name__}"
 
 
 def _load_cached_frames():
@@ -192,10 +208,12 @@ def _fetch_espn_schedule_frames():
 
 def _fetch_schedule_frames():
     """Use ESPN's schedule feed first, with NBA sources and cache as backups."""
-    global _FETCH_RETRY_AFTER, _LAST_FETCH_ERROR
+    global _FETCH_RETRY_AFTER, _LAST_FETCH_ERROR, _LAST_FETCH_DIAGNOSTIC
     if time.monotonic() < _FETCH_RETRY_AFTER:
-        raise RuntimeError("NBA schedule sources are temporarily unavailable; retrying after a short pause.") from _LAST_FETCH_ERROR
+        message = _LAST_FETCH_DIAGNOSTIC or "NBA schedule sources are temporarily unavailable."
+        raise RuntimeError(f"{message} Retrying after a short pause.") from _LAST_FETCH_ERROR
     last_error = None
+    source_errors = []
 
     # ESPN is the primary source because Streamlit Cloud receives HTTP 403
     # responses from the NBA CDN. Fetch the current season in bounded date
@@ -203,10 +221,11 @@ def _fetch_schedule_frames():
     try:
         schedule, weeks = _fetch_espn_schedule_frames()
         _save_cached_frames(schedule, weeks)
-        _FETCH_RETRY_AFTER, _LAST_FETCH_ERROR = 0.0, None
+        _FETCH_RETRY_AFTER, _LAST_FETCH_ERROR, _LAST_FETCH_DIAGNOSTIC = 0.0, None, ""
         return schedule, weeks, "ESPN primary schedule"
     except Exception as error:
         last_error = error
+        source_errors.append(_schedule_error_detail("ESPN scoreboard", error))
 
     try:
         frames = ScheduleLeagueV2(season=NBA_SEASON, timeout=20).get_data_frames()
@@ -218,10 +237,11 @@ def _fetch_schedule_frames():
         if not required.issubset(schedule.columns) or not week_required.issubset(weeks.columns):
             raise ValueError("NBA Stats schedule response was incomplete.")
         _save_cached_frames(schedule, weeks)
-        _FETCH_RETRY_AFTER, _LAST_FETCH_ERROR = 0.0, None
+        _FETCH_RETRY_AFTER, _LAST_FETCH_ERROR, _LAST_FETCH_DIAGNOSTIC = 0.0, None, ""
         return schedule, weeks, "NBA Stats fallback"
     except Exception as error:
         last_error = error
+        source_errors.append(_schedule_error_detail("NBA Stats", error))
         time.sleep(1)
 
     headers = {
@@ -230,7 +250,7 @@ def _fetch_schedule_frames():
         "Origin": "https://www.nba.com",
         "Accept": "application/json,text/plain,*/*",
     }
-    for cdn_url in NBA_CDN_URLS:
+    for index, cdn_url in enumerate(NBA_CDN_URLS, start=1):
         try:
             response = requests.get(cdn_url, headers=headers, timeout=12)
             response.raise_for_status()
@@ -250,17 +270,21 @@ def _fetch_schedule_frames():
             if schedule.empty or weeks.empty or not required.issubset(weeks.columns):
                 raise ValueError("NBA CDN schedule format was incomplete.")
             _save_cached_frames(schedule, weeks)
-            _FETCH_RETRY_AFTER, _LAST_FETCH_ERROR = 0.0, None
+            _FETCH_RETRY_AFTER, _LAST_FETCH_ERROR, _LAST_FETCH_DIAGNOSTIC = 0.0, None, ""
             return schedule, weeks, "NBA CDN fallback"
         except Exception as error:
             last_error = error
+            source_errors.append(_schedule_error_detail(f"NBA CDN source {index}", error))
     cached = _load_cached_frames()
     if cached is not None:
-        _FETCH_RETRY_AFTER, _LAST_FETCH_ERROR = 0.0, None
+        _FETCH_RETRY_AFTER, _LAST_FETCH_ERROR, _LAST_FETCH_DIAGNOSTIC = 0.0, None, ""
         return cached[0], cached[1], "cached"
+    _LAST_FETCH_DIAGNOSTIC = "; ".join(source_errors) or "No schedule source returned data."
     _LAST_FETCH_ERROR = last_error
     _FETCH_RETRY_AFTER = time.monotonic() + 300
-    raise RuntimeError("NBA schedule sources timed out and no saved schedule is available.") from last_error
+    raise RuntimeError(
+        f"NBA schedule sources failed ({_LAST_FETCH_DIAGNOSTIC}); no saved schedule is available."
+    ) from last_error
 
 
 def get_matchup_week_schedule(reference_date=None):

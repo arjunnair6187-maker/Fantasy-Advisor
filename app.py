@@ -767,7 +767,11 @@ def render_schedule(league, previous_league, team, matchup, schedule):
     st.title("Schedule & matchup projection")
     updated_caption()
     if not schedule:
-        st.warning("NBA schedule data is unavailable. Per-game player projections are still shown; schedule totals and legal daily lineup projections are paused.")
+        warning = "NBA schedule data is unavailable. Per-game player projections are still shown; schedule totals and legal daily lineup projections are paused."
+        schedule_error = st.session_state.get("nba_schedule_error")
+        if schedule_error:
+            warning += f" Source details: {schedule_error}"
+        st.warning(warning)
         opponent = opponent_for(matchup, team)
         with st.spinner("Loading ESPN player projections..."):
             mine, _, my_missing = project_team_for_week(league, team, None, previous_league)
@@ -3613,8 +3617,10 @@ if active_league_record["sport"] == "nfl":
 schedule = None
 try:
     schedule = load_schedule()
+    st.session_state.pop("nba_schedule_error", None)
 except Exception as error:
-    st.sidebar.warning(f"NBA schedule unavailable ({type(error).__name__}).")
+    st.session_state["nba_schedule_error"] = str(error)[:500]
+    st.sidebar.warning(f"NBA schedule unavailable: {st.session_state['nba_schedule_error']}")
 
 reported_period = int(getattr(league, "currentMatchupPeriod", 1) or 1)
 active_period = effective_matchup_period(league, schedule)
