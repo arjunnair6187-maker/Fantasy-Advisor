@@ -52,10 +52,13 @@ def _details_by_id(league, roster):
 
 def projection_rows(league, team, game_counts, previous_league=None):
     """Build reusable player projection rows for one roster."""
-    games_by_team = {
-        normalize_nba_team(team_code): int(games)
-        for team_code, games in zip(game_counts["NBA team"], game_counts["Games"])
-    }
+    games_by_team = {}
+    schedule_available = game_counts is not None
+    if schedule_available:
+        games_by_team = {
+            normalize_nba_team(team_code): int(games)
+            for team_code, games in zip(game_counts["NBA team"], game_counts["Games"])
+        }
     roster = list(team.roster)
     details = _details_by_id(league, roster)
     previous_details = _details_by_id(previous_league, roster)
@@ -65,7 +68,7 @@ def projection_rows(league, team, game_counts, previous_league=None):
         prior = previous_details.get(player.playerId)
         projection = blended_projection(detail, previous_player=prior)
         nba_team = normalize_nba_team(getattr(player, "proTeam", ""))
-        games = int(games_by_team.get(nba_team, 0))
+        games = int(games_by_team.get(nba_team, 0)) if schedule_available else None
         rows.append({
             "Player": player.name,
             "NBA team": nba_team or "Unknown",
@@ -75,7 +78,10 @@ def projection_rows(league, team, game_counts, previous_league=None):
             "Blended FP/G": projection["blended_fppg"],
             "Projection basis": projection["projection_basis"],
             "Games this week": games,
-            "Projected week (all games)": None if projection["blended_fppg"] is None else round(projection["blended_fppg"] * games, 2),
+            "Projected week (all games)": (
+                None if projection["blended_fppg"] is None or games is None
+                else round(projection["blended_fppg"] * games, 2)
+            ),
             "_player": player,
             "_detail": detail,
         })

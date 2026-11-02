@@ -16,6 +16,9 @@ NBA_CDN_URLS = (
     "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json",
     "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_1.json",
 )
+ESPN_SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
+ESPN_SCHEDULE_CHUNK_DAYS = 45
+ESPN_SCHEDULE_TIMEOUT_SECONDS = 10
 _FETCH_RETRY_AFTER = 0.0
 _LAST_FETCH_ERROR = None
 
@@ -50,15 +53,158 @@ def _save_cached_frames(schedule, weeks):
         pass
 
 
+def _season_date_range():
+    """Return a broad date range covering this season and its playoffs."""
+    season_start_year = int(NBA_SEASON.split("-", maxsplit=1)[0])
+    return date(season_start_year, 10, 1), date(season_start_year + 1, 7, 1)
+
+
+def _date_chunks(start_date, end_date, chunk_days=ESPN_SCHEDULE_CHUNK_DAYS):
+    current = start_date
+    while current <= end_date:
+        chunk_end = min(current + timedelta(days=chunk_days - 1), end_date)
+        yield current, chunk_end
+        current = chunk_end + timedelta(days=1)
+
+
+def _espn_event_to_schedule_row(event):
+    """Convert one ESPN scoreboard event into the columns used by the app."""
+    competitions = event.get("competitions") or []
+    if not competitions:
+        return None
+    competition = competitions[0]
+    competitors = competition.get("competitors") or []
+    home = next((item for item in competitors if item.get("homeAway") == "home"), None)
+    away = next((item for item in competitors if item.get("homeAway") == "away"), None)
+    if not home or not away:
+        return None
+
+    # ESPN timestamps are UTC. NBA schedule dates are conventionally grouped
+    # by the Eastern calendar day; using the date portion as-is shifts many
+    # evening games into the following day.
+    raw_date = competition.get("date") or event.get("date")
+    parsed_date = pd.to_datetime(raw_date, errors="coerce", utc=True)
+    if pd.isna(parsed_date):
+        return None
+    game_date = parsed_date.tz_convert("America/New_York").date()
+
+    event_season = event.get("season") or {}
+    season_type = event_season.get("type")
+    try:
+        season_type = int(season_type)
+    except (TypeError, ValueError):
+        season_type = None
+    # ESPN season type 1 is preseason. Exclude it from fantasy planning.
+    if season_type == 1:
+        return None
+
+    def team_code(competitor):
+        team = competitor.get("team") or {}
+        code = team.get("abbreviation") or team.get("shortDisplayName")
+        return {
+            "GS": "GSW", "NY": "NYK", "NO": "NOP", "SA": "SAS", "WSH": "WAS",
+        }.get(code, code)
+
+    def score(competitor):
+        value = competitor.get("score")
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    return {
+        "gameId": event.get("id") or f"{game_date.isoformat()}:{team_code(home)}:{team_code(away)}",
+        "gameDateEst": game_date.isoformat(),
+        "gameLabel": {1: "Preseason", 3: "Playoffs"}.get(season_type, "Regular Season"),
+        "homeTeam_teamTricode": team_code(home),
+        "awayTeam_teamTricode": team_code(away),
+        "homeTeam_score": score(home),
+        "awayTeam_score": score(away),
+    }
+
+
+def _frames_from_espn_events(events):
+    rows = []
+    for event in events:
+        row = _espn_event_to_schedule_row(event)
+        if row and row["homeTeam_teamTricode"] and row["awayTeam_teamTricode"]:
+            rows.append(row)
+    schedule = pd.DataFrame(rows)
+    if schedule.empty:
+        raise ValueError("ESPN returned no usable NBA schedule events.")
+    if "gameId" in schedule.columns:
+        schedule = schedule.drop_duplicates(subset=["gameId"], keep="last")
+    schedule["game_date"] = pd.to_datetime(schedule["gameDateEst"], errors="coerce").dt.date
+    schedule = schedule.dropna(subset=["game_date"])
+    first_game, last_game = schedule["game_date"].min(), schedule["game_date"].max()
+    first_monday = first_game - timedelta(days=first_game.weekday())
+    last_sunday = last_game + timedelta(days=6 - last_game.weekday())
+    week_rows = []
+    week_start = first_monday
+    week_number = 1
+    while week_start <= last_sunday:
+        week_end = week_start + timedelta(days=6)
+        week_rows.append({
+            "weekNumber": week_number,
+            "weekName": f"{week_start:%b %d} – {week_end:%b %d}",
+            "startDate": week_start.isoformat(),
+            "endDate": week_end.isoformat(),
+        })
+        week_start += timedelta(days=7)
+        week_number += 1
+    return schedule.drop(columns=["game_date"]), pd.DataFrame(week_rows)
+
+
+def _fetch_espn_schedule_frames():
+    """Fetch this NBA season in date chunks from ESPN's public scoreboard."""
+    start_date, end_date = _season_date_range()
+    events_by_id = {}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; FantasyAdvisor/1.0)",
+        "Accept": "application/json,text/plain,*/*",
+        "Referer": "https://www.espn.com/nba/",
+    }
+    for chunk_start, chunk_end in _date_chunks(start_date, end_date):
+        response = requests.get(
+            ESPN_SCOREBOARD_URL,
+            params={
+                "dates": f"{chunk_start:%Y%m%d}-{chunk_end:%Y%m%d}",
+                "limit": 500,
+            },
+            headers=headers,
+            timeout=ESPN_SCHEDULE_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        events = payload.get("events")
+        if not isinstance(events, list):
+            raise ValueError("ESPN NBA scoreboard response had no events list.")
+        for event in events:
+            event_id = event.get("id")
+            if event_id:
+                events_by_id[str(event_id)] = event
+            else:
+                events_by_id[f"{event.get('date')}:{len(events_by_id)}"] = event
+
+    schedule, weeks = _frames_from_espn_events(list(events_by_id.values()))
+    return schedule, weeks
+
+
 def _fetch_schedule_frames():
-    """Try NBA Stats, current NBA CDN variants, then a recent local copy."""
+    """Try NBA Stats, NBA CDN, ESPN's public schedule, then a recent local copy."""
     global _FETCH_RETRY_AFTER, _LAST_FETCH_ERROR
     if time.monotonic() < _FETCH_RETRY_AFTER:
         raise RuntimeError("NBA schedule sources are temporarily unavailable; retrying after a short pause.") from _LAST_FETCH_ERROR
     last_error = None
     try:
         frames = ScheduleLeagueV2(season=NBA_SEASON, timeout=20).get_data_frames()
+        if len(frames) < 2 or frames[0].empty or frames[1].empty:
+            raise ValueError("NBA Stats returned an empty schedule.")
         schedule, weeks = frames[0].copy(), frames[1].copy()
+        required = {"gameDateEst", "homeTeam_teamTricode", "awayTeam_teamTricode"}
+        week_required = {"weekNumber", "weekName", "startDate", "endDate"}
+        if not required.issubset(schedule.columns) or not week_required.issubset(weeks.columns):
+            raise ValueError("NBA Stats schedule response was incomplete.")
         _save_cached_frames(schedule, weeks)
         _FETCH_RETRY_AFTER, _LAST_FETCH_ERROR = 0.0, None
         return schedule, weeks, "live"
@@ -80,7 +226,7 @@ def _fetch_schedule_frames():
             for game_date in root.get("gameDates", []):
                 for game in game_date.get("games", []):
                     game_rows.append({
-                        "gameDateEst": game.get("gameDateTimeEst") or game_date.get("gameDate"),
+                        "gameDateEst": game.get("gameDateEst") or game_date.get("gameDate") or game.get("gameDateTimeEst"),
                         "gameLabel": game.get("gameLabel", ""),
                         "homeTeam_teamTricode": game.get("homeTeam", {}).get("teamTricode"),
                         "awayTeam_teamTricode": game.get("awayTeam", {}).get("teamTricode"),
@@ -95,6 +241,13 @@ def _fetch_schedule_frames():
             return schedule, weeks, "NBA CDN fallback"
         except Exception as error:
             last_error = error
+    try:
+        schedule, weeks = _fetch_espn_schedule_frames()
+        _save_cached_frames(schedule, weeks)
+        _FETCH_RETRY_AFTER, _LAST_FETCH_ERROR = 0.0, None
+        return schedule, weeks, "ESPN live schedule fallback"
+    except Exception as error:
+        last_error = error
     cached = _load_cached_frames()
     if cached is not None:
         _FETCH_RETRY_AFTER, _LAST_FETCH_ERROR = 0.0, None

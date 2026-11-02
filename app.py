@@ -767,11 +767,43 @@ def render_schedule(league, previous_league, team, matchup, schedule):
     st.title("Schedule & matchup projection")
     updated_caption()
     if not schedule:
-        st.error("NBA schedule data is unavailable, so this page cannot calculate projections.")
+        st.warning("NBA schedule data is unavailable. Per-game player projections are still shown; schedule totals and legal daily lineup projections are paused.")
+        opponent = opponent_for(matchup, team)
+        with st.spinner("Loading ESPN player projections..."):
+            mine, _, my_missing = project_team_for_week(league, team, None, previous_league)
+            theirs = None
+            opp_missing = 0
+            if opponent is not None:
+                theirs, _, opp_missing = project_team_for_week(
+                    league, opponent, None, previous_league
+                )
+        if opponent is None:
+            st.subheader(f"{team.team_name} · per-game player projections")
+            st.dataframe(mine.drop(columns=["Games this week", "Projected week (all games)"], errors="ignore"),
+                         hide_index=True, use_container_width=True)
+            st.info("ESPN has not supplied a current opponent. Player FP/G projections remain available without the schedule.")
+        else:
+            left, right = st.columns(2)
+            with left:
+                st.subheader(f"{team.team_name} · per-game player projections")
+                st.dataframe(mine.drop(columns=["Games this week", "Projected week (all games)"], errors="ignore"),
+                             hide_index=True, use_container_width=True)
+                st.metric("Players with FP/G projections", f"{int(mine['Blended FP/G'].notna().sum())}/{len(mine)}")
+            with right:
+                st.subheader(f"{opponent.team_name} · per-game player projections")
+                st.dataframe(theirs.drop(columns=["Games this week", "Projected week (all games)"], errors="ignore"),
+                             hide_index=True, use_container_width=True)
+                st.metric("Players with FP/G projections", f"{int(theirs['Blended FP/G'].notna().sum())}/{len(theirs)}")
+        if my_missing or opp_missing:
+            st.caption("Some player rows have no projection because ESPN did not return a current projection or prior-season result.")
+        st.caption("Blended FP/G = 70% ESPN 2026–27 projection + 30% actual 2025–26 FP/G when both are available. Weekly totals are withheld until the NBA schedule returns.")
         return
     st.caption(f"{schedule['week_name']}: {schedule['start_date']:%b %d}–{schedule['end_date']:%b %d, %Y}")
-    if schedule.get("source") == "cached":
-        st.warning("NBA.com timed out, so this page is using the last successfully saved schedule.")
+    schedule_source = str(schedule.get("source") or "")
+    if schedule_source == "cached":
+        st.warning("The live schedule sources could not be reached, so this page is using the last successfully saved schedule.")
+    elif "espn" in schedule_source.casefold():
+        st.caption("Schedule source: ESPN public scoreboard fallback. NBA Stats and NBA.com remain the preferred sources.")
     render_win_probability(calculate_live_outlook(
         CACHE_SCOPE, team.team_name, league, previous_league, matchup, schedule
     ))
