@@ -191,11 +191,23 @@ def _fetch_espn_schedule_frames():
 
 
 def _fetch_schedule_frames():
-    """Try NBA Stats, NBA CDN, ESPN's public schedule, then a recent local copy."""
+    """Use ESPN's schedule feed first, with NBA sources and cache as backups."""
     global _FETCH_RETRY_AFTER, _LAST_FETCH_ERROR
     if time.monotonic() < _FETCH_RETRY_AFTER:
         raise RuntimeError("NBA schedule sources are temporarily unavailable; retrying after a short pause.") from _LAST_FETCH_ERROR
     last_error = None
+
+    # ESPN is the primary source because Streamlit Cloud receives HTTP 403
+    # responses from the NBA CDN. Fetch the current season in bounded date
+    # chunks and normalize it to the same schema as the NBA schedule feeds.
+    try:
+        schedule, weeks = _fetch_espn_schedule_frames()
+        _save_cached_frames(schedule, weeks)
+        _FETCH_RETRY_AFTER, _LAST_FETCH_ERROR = 0.0, None
+        return schedule, weeks, "ESPN primary schedule"
+    except Exception as error:
+        last_error = error
+
     try:
         frames = ScheduleLeagueV2(season=NBA_SEASON, timeout=20).get_data_frames()
         if len(frames) < 2 or frames[0].empty or frames[1].empty:
@@ -207,10 +219,11 @@ def _fetch_schedule_frames():
             raise ValueError("NBA Stats schedule response was incomplete.")
         _save_cached_frames(schedule, weeks)
         _FETCH_RETRY_AFTER, _LAST_FETCH_ERROR = 0.0, None
-        return schedule, weeks, "live"
+        return schedule, weeks, "NBA Stats fallback"
     except Exception as error:
         last_error = error
         time.sleep(1)
+
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Referer": "https://www.nba.com/",
@@ -241,13 +254,6 @@ def _fetch_schedule_frames():
             return schedule, weeks, "NBA CDN fallback"
         except Exception as error:
             last_error = error
-    try:
-        schedule, weeks = _fetch_espn_schedule_frames()
-        _save_cached_frames(schedule, weeks)
-        _FETCH_RETRY_AFTER, _LAST_FETCH_ERROR = 0.0, None
-        return schedule, weeks, "ESPN live schedule fallback"
-    except Exception as error:
-        last_error = error
     cached = _load_cached_frames()
     if cached is not None:
         _FETCH_RETRY_AFTER, _LAST_FETCH_ERROR = 0.0, None

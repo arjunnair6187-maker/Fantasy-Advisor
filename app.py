@@ -803,7 +803,7 @@ def render_schedule(league, previous_league, team, matchup, schedule):
     if schedule_source == "cached":
         st.warning("The live schedule sources could not be reached, so this page is using the last successfully saved schedule.")
     elif "espn" in schedule_source.casefold():
-        st.caption("Schedule source: ESPN public scoreboard fallback. NBA Stats and NBA.com remain the preferred sources.")
+        st.caption("Schedule source: ESPN public scoreboard (primary source).")
     render_win_probability(calculate_live_outlook(
         CACHE_SCOPE, team.team_name, league, previous_league, matchup, schedule
     ))
