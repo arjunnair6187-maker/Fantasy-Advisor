@@ -55,6 +55,43 @@ def _trending_adds(sport="nfl", lookback_hours=168, limit=100):
     return value if isinstance(value, list) else []
 
 
+@st.cache_data(ttl=150, show_spinner=False)
+def _recent_league_player_scores(league_id, season, before_week, weeks=4):
+    """Collect verified fantasy points from recent Sleeper matchup snapshots.
+
+    Sleeper's documented API does not publish player forecasts. This history is
+    used only to form a clearly labeled recent-scoring baseline, never passed
+    off as a Sleeper projection.
+    """
+    scores = {}
+    start_week = max(1, int(before_week) - int(weeks))
+    for week in range(start_week, int(before_week)):
+        try:
+            matchups = _get_json(f"league/{league_id}/matchups/{week}") or []
+        except SleeperAPIError:
+            continue
+        for matchup in matchups:
+            player_points = matchup.get("players_points") or {}
+            if not isinstance(player_points, dict):
+                continue
+            for player_id, points in player_points.items():
+                try:
+                    scores.setdefault(str(player_id), []).append((week, float(points)))
+                except (TypeError, ValueError):
+                    continue
+    return scores
+
+
+def _weighted_recent_average(history):
+    """Return a recency-weighted average over up to four actual scoring weeks."""
+    recent = sorted(history or [], key=lambda row: row[0], reverse=True)[:4]
+    if not recent:
+        return None
+    weights = [0.4, 0.3, 0.2, 0.1][:len(recent)]
+    weight_total = sum(weights)
+    return round(sum(points * weight for (_, points), weight in zip(recent, weights)) / weight_total, 2)
+
+
 def _position(value):
     position = str(value or "Unknown").upper()
     return PLAYER_POSITIONS.get(position, position)
@@ -74,6 +111,8 @@ class SleeperPlayer:
     avg_points: float | None = None
     projected_total_points: float | None = None
     projected_avg_points: float | None = None
+    projection_basis: str = "Unavailable"
+    projection_games: int = 0
     percent_owned: float | None = None
     trending_adds: int = 0
     schedule: dict = field(default_factory=dict)
@@ -117,6 +156,9 @@ class SleeperLeague:
         )
         self.current_week = self._current_week()
         self.nfl_week = self.current_week
+        self._recent_scores = _recent_league_player_scores(
+            self.league_id, self.year, self.current_week, weeks=4,
+        )
         self.rosters = _get_json(f"league/{self.league_id}/rosters") or []
         self.users = _get_json(f"league/{self.league_id}/users") or []
         self._matchup_cache = {}
@@ -178,6 +220,11 @@ class SleeperLeague:
                 raw = self._player_directory.get(key) or {}
                 position = _position(raw.get("position"))
                 points = player_scores.get(key)
+                history = self._recent_scores.get(key) or []
+                player_stats = {week: {"points": score} for week, score in history}
+                if points is not None:
+                    player_stats[self.current_week] = {"points": points}
+                baseline = _weighted_recent_average(history)
                 players.append(SleeperPlayer(
                     playerId=key,
                     name=self._player_name(raw, key),
@@ -186,9 +233,16 @@ class SleeperLeague:
                     lineupSlot=(position if key in starter_ids else "BE"),
                     eligibleSlots=[_position(item) for item in raw.get("fantasy_positions") or [position]],
                     injuryStatus=str(raw.get("injury_status") or "Active"),
-                    stats={self.current_week: {"points": points}} if points is not None else {},
+                    stats=player_stats,
                     total_points=None,
                     avg_points=None,
+                    projected_avg_points=baseline,
+                    projected_total_points=baseline,
+                    projection_basis=(
+                        "Recent actual scoring baseline (last 4 weeks)"
+                        if self._recent_scores.get(key) else "Unavailable — no recent league scoring history"
+                    ),
+                    projection_games=len(history),
                     percent_owned=None,
                 ))
             owner_id = str(roster.get("owner_id") or "")
@@ -324,6 +378,13 @@ class SleeperLeague:
                 proTeam=str(raw.get("team") or "—"),
                 eligibleSlots=[_position(value) for value in raw.get("fantasy_positions") or [player_position]],
                 injuryStatus=str(raw.get("injury_status") or "Active"),
+                projected_avg_points=_weighted_recent_average(self._recent_scores.get(player_id)),
+                projected_total_points=_weighted_recent_average(self._recent_scores.get(player_id)),
+                projection_basis=(
+                    "Recent actual scoring baseline (last 4 weeks)"
+                    if self._recent_scores.get(player_id) else "Unavailable — no recent league scoring history"
+                ),
+                projection_games=len(self._recent_scores.get(player_id) or []),
                 percent_owned=0.0,
                 trending_adds=int(item.get("count") or 0),
             )

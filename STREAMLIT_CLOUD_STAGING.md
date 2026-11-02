@@ -37,7 +37,7 @@ server_metadata_url = "<oidc-provider-metadata-url>"
 
 Community Cloud exposes root-level secrets as environment variables; the app reads the `[auth]` section through `st.secrets`. Never paste secrets into this guide, chat, source code, or GitHub. The AI Analyst is temporarily disabled in this staging build.
 
-The app supports ESPN NBA and NFL, plus a read-only Sleeper NFL adapter using the NFL HUD. Sleeper's current public API does not supply player projections or weekly schedules to this adapter. Yahoo is pending application approval and OAuth credentials.
+The app supports ESPN NBA and NFL, plus a read-only Sleeper NFL adapter using the NFL HUD. Sleeper does not publish player projections through this adapter; when history is available, the NFL HUD uses a labeled recency-weighted baseline from up to four weeks of actual league scores. The Sleeper adapter does not provide player-by-player schedules. Yahoo supports football and basketball at the API level but is not connected in this build; its OAuth setup and connector remain future work.
 
 ## Deploy a separate app
 

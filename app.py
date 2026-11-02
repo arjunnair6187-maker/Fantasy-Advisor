@@ -2333,6 +2333,12 @@ def _nfl_roster_rows(players, week):
         stats = getattr(player, "stats", None) or {}
         week_stats = stats.get(week, stats.get(str(week), {})) if isinstance(stats, dict) else {}
         week_stats = week_stats if isinstance(week_stats, dict) else {}
+        provider_projection = _nfl_stat_number(week_stats.get("projected_points"))
+        projection_basis = "ESPN league projection" if provider_projection is not None else "Unavailable"
+        if provider_projection is None:
+            provider_projection = _nfl_stat_number(getattr(player, "projected_avg_points", None))
+            if provider_projection is not None:
+                projection_basis = str(getattr(player, "projection_basis", "Recent scoring baseline"))
         slots = getattr(player, "eligibleSlots", None) or []
         rows.append({
             "Player": getattr(player, "name", "Unknown"),
@@ -2342,7 +2348,8 @@ def _nfl_roster_rows(players, week):
             "Eligible slots": ", ".join(map(str, slots)),
             "Injury status": getattr(player, "injuryStatus", "Unknown") or "Unknown",
             "Week points": _nfl_stat_number(week_stats.get("points")),
-            "Week projection": _nfl_stat_number(week_stats.get("projected_points")),
+            "Week projection": provider_projection,
+            "Projection basis": projection_basis,
             "Season points": _nfl_stat_number(getattr(player, "total_points", None)),
             "Season avg": _nfl_stat_number(getattr(player, "avg_points", None)),
             "Trending adds": getattr(player, "trending_adds", None),
@@ -2473,24 +2480,31 @@ def render_nfl_dashboard(league, team, league_record):
         score_text = "Score not returned yet"
         if my_score is not None and opp_score is not None:
             score_text = f"{float(my_score):.1f} – {float(opp_score):.1f}"
-        projection_text = "Player projection not supplied by this provider"
+        projection_text = "No matchup projection supplied"
         if my_projection is not None and opp_projection is not None:
             projection_text = f"{provider_name} projection: {float(my_projection):.1f} – {float(opp_projection):.1f}"
+        elif league_record.get("provider") == "sleeper":
+            own_rows = _nfl_roster_rows(getattr(team, "roster", []), week)
+            opponent_rows = _nfl_roster_rows(getattr(opponent, "roster", []), week)
+            own_baseline = sum(row["Week projection"] for row in own_rows if row.get("Week projection") is not None)
+            opponent_baseline = sum(row["Week projection"] for row in opponent_rows if row.get("Week projection") is not None)
+            if own_baseline or opponent_baseline:
+                projection_text = f"Recent-score roster baseline: {own_baseline:.1f} – {opponent_baseline:.1f}"
         st.info(f"Week {week} matchup vs {opponent.team_name}: {score_text}. {projection_text}.")
     else:
         st.info(f"{provider_name} has not returned a matchup for your team in the current week.")
 
     roster_rows = _nfl_roster_rows(getattr(team, "roster", []), week)
-    st.subheader("Roster and weekly points" if league_record.get("provider") == "sleeper" else "Roster and weekly projections")
+    st.subheader("Roster and weekly projections")
     if roster_rows:
         roster = pd.DataFrame(roster_rows)
         st.dataframe(roster, hide_index=True, use_container_width=True)
         if league_record.get("provider") == "sleeper":
-            st.caption("Sleeper supplies current matchup scoring and roster status, but not weekly player projections through this connection.")
+            st.caption("Sleeper has no official player forecasts in this connection. Its recent-score baseline is derived from up to four weeks of actual league scoring.")
         else:
             st.caption(f"{provider_name} supplies league-scored points and projections. This view does not change your lineup.")
         recommended, current_total, best_total = _nfl_optimal_lineup(roster_rows)
-        st.subheader("Projection-based starting lineup" if league_record.get("provider") == "espn" else "Current weekly starters")
+        st.subheader("Projection-based starting lineup" if league_record.get("provider") == "espn" else "Recent-score lineup baseline")
         if recommended:
             left, right = st.columns(2)
             left.metric("Current projected starters", "—" if current_total is None else f"{current_total:.2f}")
@@ -2499,13 +2513,13 @@ def render_nfl_dashboard(league, team, league_record):
             st.dataframe(pd.DataFrame(recommended), hide_index=True, use_container_width=True)
         else:
             if league_record.get("provider") == "sleeper":
-                st.info("Sleeper supplies current starters and scored points, but not the projections needed to rank alternate lineups.")
+                st.info("No recent Sleeper scoring history is available yet, so alternate lineups cannot be ranked.")
             else:
                 st.info("A lineup recommendation is not available because ESPN did not return starter slots and usable weekly projections.")
         st.caption(
             "Uses ESPN starter slots, eligibility, and weekly projections. Confirm late injury news and lineup locks in ESPN."
             if league_record.get("provider") == "espn"
-            else "Sleeper identifies the current starters; its public API does not include player projections for alternate-lineup ranking. Verify lineup rules in Sleeper."
+            else "Sleeper lineups are ranked with recent actual player scores, not an official forward projection. Confirm injury news, rules, and lineup locks in Sleeper."
         )
     else:
         st.info(f"{provider_name} returned an empty roster for this team.")
@@ -2527,7 +2541,16 @@ def render_nfl_dashboard(league, team, league_record):
                 "Position": getattr(player, "position", "Unknown"),
                 "NFL team": getattr(player, "proTeam", "Unknown"),
                 "Injury status": getattr(player, "injuryStatus", "Unknown") or "Unknown",
-                "Week projection": _nfl_stat_number(week_stats.get("projected_points")),
+                "Week projection": (
+                    _nfl_stat_number(week_stats.get("projected_points"))
+                    if _nfl_stat_number(week_stats.get("projected_points")) is not None
+                    else _nfl_stat_number(getattr(player, "projected_avg_points", None))
+                ),
+                "Projection basis": (
+                    "ESPN league projection"
+                    if _nfl_stat_number(week_stats.get("projected_points")) is not None
+                    else str(getattr(player, "projection_basis", "Unavailable"))
+                ),
                 "Season avg": _nfl_stat_number(getattr(player, "avg_points", None)),
                 "Rostered %": _nfl_stat_number(getattr(player, "percent_owned", None)),
                 "Trending adds": getattr(player, "trending_adds", None),
@@ -2543,7 +2566,7 @@ def render_nfl_dashboard(league, team, league_record):
     st.caption(
         "Available-player projections use your ESPN league's scoring. Review injury news and claim settings in ESPN before acting."
         if league_record.get("provider") == "espn"
-        else "Available players are ordered by Sleeper's recent trending adds. This is interest data, not a scoring projection or endorsement; verify availability in Sleeper."
+        else "Sleeper trending activity is interest data, not a player rating. The displayed scoring baseline uses up to four weeks of actual league scores; verify availability in Sleeper."
     )
 
 
@@ -2761,7 +2784,7 @@ def render_nfl_page(page, league, team, league_record):
     updated_caption()
 
     if page == "Weekly Lineup":
-        st.subheader("Projection-based starting lineup" if league_record.get("provider") == "espn" else "Current weekly starters")
+        st.subheader("Projection-based starting lineup" if league_record.get("provider") == "espn" else "Recent-score lineup baseline")
         recommended, current_total, best_total = _nfl_optimal_lineup(rows)
         if recommended:
             current_label = "—" if current_total is None else f"{current_total:.2f}"
@@ -2773,7 +2796,7 @@ def render_nfl_page(page, league, team, league_record):
             st.dataframe(pd.DataFrame(recommended), hide_index=True, use_container_width=True)
         else:
             if league_record.get("provider") == "sleeper":
-                st.info("Sleeper does not provide player projections through this API connection, so the app can show your current starters but cannot rank an alternate lineup yet.")
+                st.info("No recent Sleeper scoring history is available yet, so alternate lineups cannot be ranked.")
             else:
                 st.info("A lineup recommendation is not available because ESPN did not return starter slots and usable weekly projections.")
         st.subheader("Full roster and bench")
@@ -2784,7 +2807,7 @@ def render_nfl_page(page, league, team, league_record):
         st.caption(
             "The recommendation fills ESPN starter slots using ESPN eligibility and weekly projections. Confirm inactive players, flex rules, and final locks in ESPN."
             if league_record.get("provider") == "espn"
-            else "Sleeper returns your current starters but not player projections for alternate-lineup ranking. Confirm inactive players, flex rules, and final locks in Sleeper."
+            else "Sleeper lineups use a recent actual-score baseline, not an official forecast. Confirm inactive players, flex rules, and final locks in Sleeper."
         )
         return
 
@@ -2803,7 +2826,7 @@ def render_nfl_page(page, league, team, league_record):
                      None if opp_proj is None else f"{provider_name} proj. {opp_proj:.1f}")
         own_rows = _nfl_roster_rows(getattr(team, "roster", []), week)
         opp_rows = _nfl_roster_rows(getattr(opponent, "roster", []), week)
-        value_field = "Week points" if league_record.get("provider") == "sleeper" else "Week projection"
+        value_field = "Week projection"
         own_groups = _nfl_projection_by_position(own_rows, field=value_field)
         opp_groups = _nfl_projection_by_position(opp_rows, field=value_field)
         position_rows = []
@@ -2812,11 +2835,11 @@ def render_nfl_page(page, league, team, league_record):
             theirs = sum(opp_groups.get(position, []))
             position_rows.append({
                 "Position": position,
-                "Your roster points" if value_field == "Week points" else "Your roster projection": round(own, 2),
-                "Opponent roster points" if value_field == "Week points" else "Opponent roster projection": round(theirs, 2),
+                "Your roster projection": round(own, 2),
+                "Opponent roster projection": round(theirs, 2),
                 "Difference": round(own-theirs, 2),
             })
-        st.subheader("Roster scoring by position" if value_field == "Week points" else "Roster projection by position")
+        st.subheader("Roster projection by position")
         if position_rows:
             st.dataframe(pd.DataFrame(position_rows).sort_values("Difference", ascending=False),
                          hide_index=True, use_container_width=True)
@@ -2825,10 +2848,7 @@ def render_nfl_page(page, league, team, league_record):
         if page == "Opponent Gameplan":
             st.subheader("Opponent roster")
             st.dataframe(pd.DataFrame(opp_rows), hide_index=True, use_container_width=True)
-        if value_field == "Week points":
-            st.caption("Sleeper matchup scoring by position includes currently scored roster points; it is not a projection and may be incomplete while games are in progress.")
-        else:
-            st.caption("Position comparisons sum rostered player projections, including bench players; they are context, not projected starter totals.")
+        st.caption("Position comparisons sum rostered player projections or recent-score baselines, including bench players; they are context, not projected starter totals.")
         return
 
     if page == "Injury Contingencies":
@@ -2846,9 +2866,7 @@ def render_nfl_page(page, league, team, league_record):
             st.dataframe(pd.DataFrame(contingency_rows), hide_index=True, use_container_width=True)
         else:
             st.info(
-                "Sleeper does not provide the projections needed to rank same-position alternatives."
-                if league_record.get("provider") == "sleeper"
-                else "No same-position bench alternative has a usable ESPN weekly projection."
+                "No same-position bench alternative has a usable player projection or recent-score baseline."
             )
         st.caption("A designation is not a medical forecast. Confirm active/inactive status before kickoff.")
         return
@@ -2869,18 +2887,16 @@ def render_nfl_page(page, league, team, league_record):
             else:
                 st.info("No available players were returned for this position.")
             if league_record.get("provider") == "sleeper":
-                st.caption("Sleeper's trending-add list is used to order available players. It is interest data, not a projection or endorsement; Sleeper attribution applies.")
+                st.caption("Sleeper trending-add counts show interest, not player quality. The displayed baseline uses recent actual scoring and your league's scoring settings.")
             else:
                 st.caption("Availability and scoring come from ESPN. Check current claims and roster rules before submitting a move.")
             return
         if page == "Roster Value":
             st.subheader("Position replacement comparison")
-            if league_record.get("provider") == "sleeper":
-                st.info("Sleeper does not expose weekly player projections in this adapter, so a projection-based replacement value would be misleading.")
-            elif upgrades:
+            if upgrades:
                 st.dataframe(pd.DataFrame(upgrades), hide_index=True, use_container_width=True)
             else:
-                st.info("ESPN did not return a same-position available player projected above your roster's lowest player.")
+                st.info("No same-position available player has a higher usable projection or recent-score baseline than the roster's lowest player.")
             st.subheader("Your roster by position")
             st.dataframe(pd.DataFrame(rows).sort_values(
                 ["Position", "Week projection"], ascending=[True, False], na_position="last"
@@ -2891,38 +2907,35 @@ def render_nfl_page(page, league, team, league_record):
             c1, c2, c3 = st.columns(3)
             c1.metric("Rostered players", len(rows))
             c2.metric("Injury flags", len(injury_rows))
-            c3.metric("Projection-rated upgrades", "Unavailable" if league_record.get("provider") == "sleeper" else len(upgrades))
-            st.subheader("Highest-value same-position waiver gaps" if league_record.get("provider") == "espn" else "Trending available players")
-            if league_record.get("provider") == "sleeper":
+            c3.metric("Projection-rated upgrades", len(upgrades))
+            st.subheader("Highest-value same-position waiver gaps")
+            if upgrades:
+                st.dataframe(pd.DataFrame(upgrades[:8]), hide_index=True, use_container_width=True)
+            elif league_record.get("provider") == "sleeper":
                 trending = [row for row in available if row.get("Trending adds") is not None]
                 if trending:
                     st.dataframe(pd.DataFrame(trending[:8]), hide_index=True, use_container_width=True)
                 else:
                     st.info("Sleeper returned no trending adds for the selected window.")
-            elif upgrades:
-                st.dataframe(pd.DataFrame(upgrades[:8]), hide_index=True, use_container_width=True)
             else:
-                st.info("No clear same-position projection upgrade was returned by ESPN.")
+                st.info("No clear same-position upgrade was returned from the available projection data.")
             if injury_rows:
                 st.subheader("Injury follow-up")
                 st.dataframe(pd.DataFrame(injury_rows), hide_index=True, use_container_width=True)
             st.caption(
                 "This board uses current ESPN projections and statuses; it does not model future roles or unsourced injury timelines."
                 if league_record.get("provider") == "espn"
-                else "Sleeper trending counts indicate recent add activity, not player quality or expected points. Injury flags come from Sleeper's public player directory."
+                else "Sleeper scores are historical results used as a baseline, not a forward projection. Trending activity is not an endorsement; player status comes from Sleeper's player directory."
             )
             return
         if page == "Move Simulator":
-            if league_record.get("provider") == "sleeper":
-                st.info("Projection-based move simulation is unavailable for Sleeper because this API adapter does not receive weekly player projections.")
-                return
             if not available or not rows:
-                st.info("A rostered player and an ESPN free agent with projections are needed to simulate a move.")
+                st.info("A rostered player and an available player with a usable estimate are needed to simulate a move.")
                 return
             add_names = [row["Player"] for row in available if row["Week projection"] is not None]
             drop_names = [row["Player"] for row in rows if row["Week projection"] is not None]
             if not add_names or not drop_names:
-                st.info("ESPN did not return enough weekly projections to compare a move.")
+                st.info("The available data did not return enough usable player estimates to compare a move.")
                 return
             add_name = st.selectbox("Player to add", add_names)
             drop_name = st.selectbox("Player to drop", drop_names)
@@ -2943,16 +2956,14 @@ def render_nfl_page(page, league, team, league_record):
                 ])
                 decision_id = save_move_decision(team.team_name, add_name, drop_name, horizons, season_gain)
                 st.success(f"Scenario {str(decision_id)[:8]} saved.")
-            st.caption("Multi-week values hold this week's ESPN projection gap constant; they are scenarios, not forecasts.")
+            st.caption("Multi-week values hold this week's projection gap or recent-score baseline constant; these are scenarios, not forecasts.")
             return
         if page == "Transaction Portfolio":
             st.subheader("Best single-step position upgrades")
-            if league_record.get("provider") == "sleeper":
-                st.info("Projection-ranked transaction planning is unavailable for Sleeper because player projections are not supplied.")
-            elif upgrades:
+            if upgrades:
                 st.dataframe(pd.DataFrame(upgrades[:10]), hide_index=True, use_container_width=True)
             else:
-                st.info("No positive same-position weekly projection changes were found.")
+                st.info("No positive same-position weekly projection or baseline changes were found.")
             st.caption("Each row is an alternative move; the table does not combine several claims or assume claims succeed.")
             return
 
@@ -2962,6 +2973,8 @@ def render_nfl_page(page, league, team, league_record):
             return
         st.dataframe(pd.DataFrame(rows).sort_values("Week projection", ascending=False, na_position="last"),
                      hide_index=True, use_container_width=True)
+        if league_record.get("provider") == "sleeper":
+            st.caption("Sleeper does not publish player forecasts here. Week projection is a recency-weighted baseline from up to four weeks of actual league scoring; check the Projection basis column before using it.")
         names = [row["Player"] for row in rows]
         selected = st.selectbox("Inspect a player", names)
         player = next(player for player in team.roster if player.name == selected)
@@ -3312,9 +3325,9 @@ def render_new_sleeper_connection(user_id):
 
 def render_yahoo_connection_status():
     with st.sidebar.expander("Yahoo Fantasy connection"):
-        st.info("Yahoo support needs an approved Yahoo Fantasy Sports API application and OAuth credentials before the app can connect.")
-        st.markdown("[Request Yahoo Fantasy API access](https://sports.yahoo.com/developer/access/)")
-        st.caption("The Yahoo connector will request read-only Fantasy Sports access. Do not paste Yahoo client secrets or tokens into this form.")
+        st.info("Yahoo's Fantasy Sports API supports football and basketball. The connector is not enabled in this build yet.")
+        st.markdown("[Yahoo Developer Network](https://developer.yahoo.com/api/)")
+        st.caption("Yahoo connection requires an OAuth app client ID, secret, and registered callback URL. Keep those in private deployment secrets; never paste them into this form.")
 
 
 def render_credential_refresh(user_id, league_record, connection_id):

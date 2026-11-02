@@ -11,7 +11,7 @@ The working copy has owner-scoped account and ESPN connection paths. It supports
 - NFL pages cover weekly lineups, matchup and opponent breakdowns, injuries, ESPN free agents, roster value, move scenarios, transaction activity, weekly recaps, power rankings, league scouting, draft review, playoff planning, bye-week checks, league scoring, decision history, and forecast accuracy.
 - NFL lineup recommendations maximize ESPN weekly projections across the current starter-slot mix and ESPN player eligibility. They remain advisory and require a final review in ESPN.
 - Sleeper NFL users can find their public leagues by username and connect one to the same NFL HUD without entering cookies or an API key. The adapter uses Sleeper roster, matchup, injury, standings, draft, transactions, and trending-add data.
-- Sleeper does not provide weekly player projections or per-player schedules through the current adapter, so projection-dependent lineup, move, playoff-schedule, and bye-week tools label or omit those results.
+- Sleeper does not publish player projections through this adapter. NFL lineup, waiver, roster-value, and move-planning screens can use a recency-weighted baseline from up to four weeks of actual league scoring; the app labels it as a baseline, not an official projection. Per-player schedules are not included.
 - Leagues, private history, forecasts, decisions, and analyst evidence are stored under both the signed-in owner and league.
 - The AI Analyst is temporarily disabled in the app. No background evidence collection or OpenAI requests are started; existing analyst records are retained and not displayed.
 - Private calculation caches include the owner, league, connection, and browser session. Public schedule and news caches remain shared.
@@ -20,7 +20,7 @@ The working copy has owner-scoped account and ESPN connection paths. It supports
 
 ## Remaining before hosted multi-user use
 
-- Yahoo is not connected yet. Yahoo requires a reviewed Fantasy Sports API application, OAuth credentials, and a registered callback before the app can make authorized read-only requests.
+- Yahoo is not connected yet. The Yahoo Fantasy API supports football and basketball, but a connector still needs an OAuth app, client credentials, registered callback, and implementation of the read-only league/player data path.
 - Sleeper's public league discovery API currently documents NFL leagues only; do not advertise it as an NBA provider. Its API is described as free for non-commercial use; confirm licensing before commercial or broader hosted use.
 - NFL news currently shows ESPN injury designations only; an independent NFL news feed and richer injury context remain future work.
 - Some NBA capabilities are intentionally sport-specific: NBA schedule streaming and daily lineup optimization are not copied to NFL. NFL uses weekly starters, bye weeks, playoff-week schedules, and NFL scoring settings instead.
