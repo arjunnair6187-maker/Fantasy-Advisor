@@ -17,21 +17,29 @@ NBA_CDN_URLS = (
     "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_1.json",
 )
 ESPN_SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
-ESPN_SCHEDULE_CHUNK_DAYS = 14
-ESPN_SCHEDULE_MAX_QUERY_DAYS = 7
-ESPN_SCOREBOARD_EVENT_LIMIT = 100
+ESPN_SCHEDULE_CHUNK_DAYS = 7
 ESPN_SCHEDULE_TIMEOUT_SECONDS = 10
 _FETCH_RETRY_AFTER = 0.0
 _LAST_FETCH_ERROR = None
 _LAST_FETCH_DIAGNOSTIC = ""
+_SCHEDULE_CACHE = None
 
 
 def _schedule_error_detail(source, error):
-    """Return provider/status diagnostics without response bodies or secrets."""
+    """Return concise provider diagnostics without exposing request credentials."""
     response = getattr(error, "response", None)
     status = getattr(response, "status_code", None)
     if status is not None:
-        return f"{source}: HTTP {status}"
+        detail = f"{source}: HTTP {status}"
+        if status == 400:
+            try:
+                message = (response.json() or {}).get("message", "")
+            except (ValueError, TypeError, AttributeError):
+                message = ""
+            message = " ".join(str(message).split())
+            if message:
+                detail += f" ({message[:120]})"
+        return detail
     if isinstance(error, requests.Timeout):
         return f"{source}: timeout"
     if isinstance(error, ValueError):
@@ -42,6 +50,9 @@ def _schedule_error_detail(source, error):
 
 
 def _load_cached_frames():
+    if _SCHEDULE_CACHE is not None:
+        schedule, weeks = _SCHEDULE_CACHE
+        return schedule.copy(), weeks.copy()
     try:
         if not CACHE_PATH.exists():
             return None
@@ -58,6 +69,8 @@ def _load_cached_frames():
 
 
 def _save_cached_frames(schedule, weeks):
+    global _SCHEDULE_CACHE
+    _SCHEDULE_CACHE = (schedule.copy(), weeks.copy())
     payload = {
         "saved_at": datetime.now().isoformat(timespec="seconds"),
         "schedule": schedule.where(pd.notna(schedule), None).to_dict(orient="records"),
@@ -174,33 +187,26 @@ def _frames_from_espn_events(events):
 
 
 def _fetch_espn_events_for_range(start_date, end_date, headers):
-    """Fetch a bounded scoreboard interval, splitting ranges rejected by ESPN."""
-    response = requests.get(
-        ESPN_SCOREBOARD_URL,
-        params={
-            "dates": f"{start_date:%Y%m%d}-{end_date:%Y%m%d}",
-            "limit": ESPN_SCOREBOARD_EVENT_LIMIT,
-        },
-        headers=headers,
-        timeout=ESPN_SCHEDULE_TIMEOUT_SECONDS,
-    )
-    range_days = (end_date - start_date).days + 1
-    if response.status_code == 400 and range_days > ESPN_SCHEDULE_MAX_QUERY_DAYS:
-        midpoint = start_date + timedelta(days=range_days // 2 - 1)
-        return (
-            _fetch_espn_events_for_range(start_date, midpoint, headers)
-            + _fetch_espn_events_for_range(midpoint + timedelta(days=1), end_date, headers)
+    """Fetch an interval using one ESPN scoreboard request per calendar day.
+
+    ESPN's public scoreboard accepts a single ``YYYYMMDD`` date reliably;
+    date-range values can return HTTP 400 even when the interval is small.
+    """
+    events = []
+    current_date = start_date
+    while current_date <= end_date:
+        response = requests.get(
+            ESPN_SCOREBOARD_URL,
+            params={"dates": current_date.strftime("%Y%m%d")},
+            headers=headers,
+            timeout=ESPN_SCHEDULE_TIMEOUT_SECONDS,
         )
-    response.raise_for_status()
-    events = response.json().get("events")
-    if not isinstance(events, list):
-        raise ValueError("ESPN NBA scoreboard response had no events list.")
-    if len(events) >= ESPN_SCOREBOARD_EVENT_LIMIT and range_days > ESPN_SCHEDULE_MAX_QUERY_DAYS:
-        midpoint = start_date + timedelta(days=range_days // 2 - 1)
-        return (
-            _fetch_espn_events_for_range(start_date, midpoint, headers)
-            + _fetch_espn_events_for_range(midpoint + timedelta(days=1), end_date, headers)
-        )
+        response.raise_for_status()
+        day_events = response.json().get("events")
+        if not isinstance(day_events, list):
+            raise ValueError("ESPN NBA scoreboard response had no events list.")
+        events.extend(day_events)
+        current_date += timedelta(days=1)
     return events
 
 
