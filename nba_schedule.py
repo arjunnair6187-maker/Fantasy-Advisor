@@ -17,7 +17,9 @@ NBA_CDN_URLS = (
     "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_1.json",
 )
 ESPN_SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
-ESPN_SCHEDULE_CHUNK_DAYS = 45
+ESPN_SCHEDULE_CHUNK_DAYS = 14
+ESPN_SCHEDULE_MAX_QUERY_DAYS = 7
+ESPN_SCOREBOARD_EVENT_LIMIT = 100
 ESPN_SCHEDULE_TIMEOUT_SECONDS = 10
 _FETCH_RETRY_AFTER = 0.0
 _LAST_FETCH_ERROR = None
@@ -171,6 +173,37 @@ def _frames_from_espn_events(events):
     return schedule.drop(columns=["game_date"]), pd.DataFrame(week_rows)
 
 
+def _fetch_espn_events_for_range(start_date, end_date, headers):
+    """Fetch a bounded scoreboard interval, splitting ranges rejected by ESPN."""
+    response = requests.get(
+        ESPN_SCOREBOARD_URL,
+        params={
+            "dates": f"{start_date:%Y%m%d}-{end_date:%Y%m%d}",
+            "limit": ESPN_SCOREBOARD_EVENT_LIMIT,
+        },
+        headers=headers,
+        timeout=ESPN_SCHEDULE_TIMEOUT_SECONDS,
+    )
+    range_days = (end_date - start_date).days + 1
+    if response.status_code == 400 and range_days > ESPN_SCHEDULE_MAX_QUERY_DAYS:
+        midpoint = start_date + timedelta(days=range_days // 2 - 1)
+        return (
+            _fetch_espn_events_for_range(start_date, midpoint, headers)
+            + _fetch_espn_events_for_range(midpoint + timedelta(days=1), end_date, headers)
+        )
+    response.raise_for_status()
+    events = response.json().get("events")
+    if not isinstance(events, list):
+        raise ValueError("ESPN NBA scoreboard response had no events list.")
+    if len(events) >= ESPN_SCOREBOARD_EVENT_LIMIT and range_days > ESPN_SCHEDULE_MAX_QUERY_DAYS:
+        midpoint = start_date + timedelta(days=range_days // 2 - 1)
+        return (
+            _fetch_espn_events_for_range(start_date, midpoint, headers)
+            + _fetch_espn_events_for_range(midpoint + timedelta(days=1), end_date, headers)
+        )
+    return events
+
+
 def _fetch_espn_schedule_frames():
     """Fetch this NBA season in date chunks from ESPN's public scoreboard."""
     start_date, end_date = _season_date_range()
@@ -181,20 +214,7 @@ def _fetch_espn_schedule_frames():
         "Referer": "https://www.espn.com/nba/",
     }
     for chunk_start, chunk_end in _date_chunks(start_date, end_date):
-        response = requests.get(
-            ESPN_SCOREBOARD_URL,
-            params={
-                "dates": f"{chunk_start:%Y%m%d}-{chunk_end:%Y%m%d}",
-                "limit": 500,
-            },
-            headers=headers,
-            timeout=ESPN_SCHEDULE_TIMEOUT_SECONDS,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        events = payload.get("events")
-        if not isinstance(events, list):
-            raise ValueError("ESPN NBA scoreboard response had no events list.")
+        events = _fetch_espn_events_for_range(chunk_start, chunk_end, headers)
         for event in events:
             event_id = event.get("id")
             if event_id:
